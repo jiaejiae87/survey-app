@@ -1,6 +1,7 @@
 import os
 import io
 import re
+import sqlite3
 import datetime
 import pandas as pd
 import streamlit as st
@@ -45,7 +46,9 @@ st.markdown("""
 </style>
 """, unsafe_allow_html=True)
 
-CSV_FILE = "survey_data.csv"
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+DB_FILE = os.path.join(BASE_DIR, "survey.db")
+CSV_FILE = os.path.join(BASE_DIR, "survey_data.csv")
 
 SCORE_COLUMNS = [
     "소통_설명및협의",
@@ -104,8 +107,86 @@ ALL_COLUMNS = [
 ]
 
 # -------------------------------------------------------------
-# 2. 데이터 불러오기 및 저장 함수 (구글 시트 & 로컬 CSV 하이브리드)
+# 2. 물리 데이터베이스(SQLite survey.db) & 구글 시트 하이브리드 연동
 # -------------------------------------------------------------
+def get_db_connection():
+    """물리 SQLite 데이터베이스 연결 객체를 생성합니다."""
+    conn = sqlite3.connect(DB_FILE, timeout=15)
+    conn.row_factory = sqlite3.Row
+    return conn
+
+def init_db():
+    """물리 DB(survey.db) 테이블 생성 및 기존 데이터 자동 마이그레이션"""
+    try:
+        conn = get_db_connection()
+        cur = conn.cursor()
+        cur.execute("""
+        CREATE TABLE IF NOT EXISTS surveys (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            등록일시 TEXT NOT NULL,
+            작성일 TEXT,
+            발주사 TEXT NOT NULL,
+            공사명 TEXT NOT NULL,
+            계약기간 TEXT,
+            담당자소속 TEXT,
+            담당자이름 TEXT,
+            소통_설명및협의 INTEGER DEFAULT 5,
+            품질_기간준수 INTEGER DEFAULT 5,
+            품질_내용준수 INTEGER DEFAULT 5,
+            품질_개선 INTEGER DEFAULT 5,
+            안전_사고예방 INTEGER DEFAULT 5,
+            기타_민원관리 INTEGER DEFAULT 5,
+            종합_전체만족도 INTEGER DEFAULT 5,
+            합계 INTEGER DEFAULT 35,
+            평균 REAL DEFAULT 5.0
+        );
+        """)
+        cur.execute("CREATE INDEX IF NOT EXISTS idx_surveys_dt ON surveys(등록일시);")
+        cur.execute("CREATE INDEX IF NOT EXISTS idx_surveys_client ON surveys(발주사);")
+        conn.commit()
+
+        # DB가 비어있고 CSV 파일이 존재하면 자동 마이그레이션
+        cur.execute("SELECT COUNT(*) FROM surveys;")
+        count = cur.fetchone()[0]
+        if count == 0 and os.path.exists(CSV_FILE):
+            try:
+                df_csv = pd.read_csv(CSV_FILE, encoding="utf-8-sig")
+                df_csv = df_csv.rename(columns=LEGACY_COLUMN_MAP)
+                for col in ALL_COLUMNS:
+                    if col not in df_csv.columns:
+                        df_csv[col] = None
+                df_csv = df_csv.dropna(subset=["발주사", "공사명"], how="all")
+                for _, r in df_csv.iterrows():
+                    cur.execute("""
+                    INSERT INTO surveys (
+                        등록일시, 작성일, 발주사, 공사명, 계약기간, 담당자소속, 담당자이름,
+                        소통_설명및협의, 품질_기간준수, 품질_내용준수, 품질_개선, 안전_사고예방, 기타_민원관리, 종합_전체만족도,
+                        합계, 평균
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);
+                    """, (
+                        str(r["등록일시"]), str(r["작성일"]) if pd.notna(r["작성일"]) else "",
+                        str(r["발주사"]), str(r["공사명"]), str(r["계약기간"]) if pd.notna(r["계약기간"]) else "",
+                        str(r["담당자소속"]) if pd.notna(r["담당자소속"]) else "", str(r["담당자이름"]) if pd.notna(r["담당자이름"]) else "",
+                        int(r["소통_설명및협의"]) if pd.notna(r["소통_설명및협의"]) else 5,
+                        int(r["품질_기간준수"]) if pd.notna(r["품질_기간준수"]) else 5,
+                        int(r["품질_내용준수"]) if pd.notna(r["품질_내용준수"]) else 5,
+                        int(r["품질_개선"]) if pd.notna(r["품질_개선"]) else 5,
+                        int(r["안전_사고예방"]) if pd.notna(r["안전_사고예방"]) else 5,
+                        int(r["기타_민원관리"]) if pd.notna(r["기타_민원관리"]) else 5,
+                        int(r["종합_전체만족도"]) if pd.notna(r["종합_전체만족도"]) else 5,
+                        int(r["합계"]) if pd.notna(r["합계"]) else 35,
+                        float(r["평균"]) if pd.notna(r["평균"]) else 5.0
+                    ))
+                conn.commit()
+            except Exception:
+                pass
+        conn.close()
+    except Exception:
+        pass
+
+# 물리 DB 초기화 자동 실행
+init_db()
+
 def is_gsheets_enabled() -> bool:
     """Streamlit Secrets에 gsheets 설정이 존재하는지 확인합니다."""
     try:
@@ -148,7 +229,7 @@ def get_excel_download_bytes(df: pd.DataFrame) -> bytes:
     return output.getvalue()
 
 def load_survey_data() -> pd.DataFrame:
-    """구글 스프레드시트 또는 로컬 CSV 파일에서 누적된 설문 데이터를 불러옵니다 (실시간 반영)."""
+    """구글 스프레드시트 또는 물리 DB(SQLite survey.db)에서 실시간 설문 데이터를 불러옵니다."""
     # 1. 구글 스프레드시트 연동 활성화 시 우선 로드
     if is_gsheets_enabled():
         try:
@@ -157,75 +238,105 @@ def load_survey_data() -> pd.DataFrame:
                 # ttl=0 으로 즉시 최신 데이터 반영 (캐시 지연 방지)
                 df = conn.read(ttl=0)
                 if df is not None and not df.empty:
-                    # 구버전 컬럼명 호환 변환
                     df = df.rename(columns=LEGACY_COLUMN_MAP)
-                    # 필수 컬럼 보정
                     for col in ALL_COLUMNS:
                         if col not in df.columns:
                             df[col] = None
                     df = df.dropna(subset=["발주사", "공사명"], how="all")
                     return df[ALL_COLUMNS].reset_index(drop=True)
         except BaseException as e:
-            st.warning(f"구글 시트 읽기 알림 (로컬 파일로 대체): {e}")
+            st.warning(f"구글 시트 읽기 알림 (물리 DB로 대체): {e}")
 
-    # 2. 로컬 CSV 파일 로드 (기본)
-    if os.path.exists(CSV_FILE):
-        try:
-            df = pd.read_csv(CSV_FILE, encoding="utf-8-sig")
-            # 구버전 컬럼명 호환 변환
-            df = df.rename(columns=LEGACY_COLUMN_MAP)
-            for col in ALL_COLUMNS:
-                if col not in df.columns:
-                    df[col] = None
-            return df[ALL_COLUMNS]
-        except Exception as e:
-            st.error(f"데이터 파일을 읽는 중 오류가 발생했습니다: {e}")
-            return pd.DataFrame(columns=ALL_COLUMNS)
-    else:
+    # 2. 물리 SQLite DB 로드 (기본 영구 저장소)
+    try:
+        conn = get_db_connection()
+        col_list = ", ".join(f'"{c}"' for c in ALL_COLUMNS)
+        query = f"SELECT {col_list} FROM surveys ORDER BY id DESC;"
+        df = pd.read_sql_query(query, conn)
+        conn.close()
+        for col in ALL_COLUMNS:
+            if col not in df.columns:
+                df[col] = None
+        return df[ALL_COLUMNS]
+    except Exception as e:
+        # DB 에러 시 로컬 CSV 보조 로드
+        if os.path.exists(CSV_FILE):
+            try:
+                df = pd.read_csv(CSV_FILE, encoding="utf-8-sig")
+                df = df.rename(columns=LEGACY_COLUMN_MAP)
+                for col in ALL_COLUMNS:
+                    if col not in df.columns:
+                        df[col] = None
+                return df[ALL_COLUMNS]
+            except Exception:
+                pass
         return pd.DataFrame(columns=ALL_COLUMNS)
 
 def save_survey_entry(entry_dict: dict) -> bool:
-    """구글 시트 및 로컬 CSV에 설문 데이터를 누적 저장합니다."""
-    df_new = pd.DataFrame([entry_dict])
-    csv_saved = False
+    """물리 DB(SQLite survey.db), 로컬 CSV, 구글 시트에 설문 데이터를 영구 저장합니다."""
+    db_saved = False
 
-    # 1. 로컬 CSV 파일에 백업 저장
+    # 1. 물리 SQLite DB에 영구 저장
     try:
+        conn = get_db_connection()
+        cur = conn.cursor()
+        cols = [c for c in ALL_COLUMNS if c in entry_dict]
+        placeholders = ", ".join(["?"] * len(cols))
+        col_str = ", ".join([f'"{c}"' for c in cols])
+        values = [entry_dict.get(c) for c in cols]
+        cur.execute(f"INSERT INTO surveys ({col_str}) VALUES ({placeholders});", values)
+        conn.commit()
+        conn.close()
+        db_saved = True
+    except Exception as e:
+        st.error(f"물리 DB 저장 오류: {e}")
+
+    # 2. 로컬 CSV 백업 저장
+    try:
+        df_new = pd.DataFrame([entry_dict])
         if not os.path.exists(CSV_FILE):
             df_new.to_csv(CSV_FILE, mode="w", index=False, encoding="utf-8-sig")
         else:
             df_new.to_csv(CSV_FILE, mode="a", index=False, header=False, encoding="utf-8-sig")
-        csv_saved = True
-    except PermissionError:
-        st.error("⚠️ 'survey_data.csv' 파일이 엑셀 등 다른 프로그램에서 열려 있습니다. 파일을 닫은 후 다시 저장해 주세요.")
-        return False
-    except Exception as e:
-        st.warning(f"로컬 파일 저장 알림: {e}")
+    except Exception:
+        pass
 
-    # 2. 구글 스프레드시트 연동 시 클라우드 시트에 실시간 동기화
+    # 3. 구글 스프레드시트 연동 시 클라우드 시트에 실시간 동기화
     if is_gsheets_enabled():
         try:
             conn = get_gsheets_connection()
             if conn:
                 current_df = conn.read(ttl=0)
                 if current_df is None or current_df.empty:
-                    updated_df = df_new[ALL_COLUMNS]
+                    updated_df = pd.DataFrame([entry_dict])[ALL_COLUMNS]
                 else:
                     current_df = current_df.dropna(subset=["발주사", "공사명"], how="all")
-                    updated_df = pd.concat([current_df, df_new], ignore_index=True)[ALL_COLUMNS]
+                    updated_df = pd.concat([current_df, pd.DataFrame([entry_dict])], ignore_index=True)[ALL_COLUMNS]
                 conn.update(data=updated_df)
                 st.cache_data.clear()
                 return True
         except Exception as e:
             st.error(f"구글 시트 저장 실패: {e}")
-            return csv_saved
 
     st.cache_data.clear()
-    return csv_saved
+    return db_saved
 
 def delete_survey_entry(target_datetime: str, target_project: str = None) -> bool:
-    """구글 시트 및 로컬 CSV에서 고유 등록일시와 공사명으로 데이터를 안전하게 실시간 삭제합니다."""
-    # 1. 로컬 CSV에서 삭제
+    """물리 DB(SQLite), 로컬 CSV, 구글 시트에서 고유 등록일시와 공사명으로 데이터를 안전하게 실시간 삭제합니다."""
+    # 1. 물리 SQLite DB에서 삭제
+    try:
+        conn = get_db_connection()
+        cur = conn.cursor()
+        if target_project:
+            cur.execute("DELETE FROM surveys WHERE 등록일시 = ? AND 공사명 = ?;", (str(target_datetime), str(target_project)))
+        else:
+            cur.execute("DELETE FROM surveys WHERE 등록일시 = ?;", (str(target_datetime),))
+        conn.commit()
+        conn.close()
+    except Exception as ex:
+        st.warning(f"물리 DB 삭제 알림: {ex}")
+
+    # 2. 로컬 CSV에서 삭제
     try:
         if os.path.exists(CSV_FILE):
             df = pd.read_csv(CSV_FILE, encoding="utf-8-sig")
@@ -237,7 +348,7 @@ def delete_survey_entry(target_datetime: str, target_project: str = None) -> boo
     except Exception as ex:
         st.warning(f"로컬 삭제 알림: {ex}")
 
-    # 2. 구글 시트에서 삭제
+    # 3. 구글 시트에서 삭제
     if is_gsheets_enabled():
         try:
             conn = get_gsheets_connection()
@@ -814,20 +925,35 @@ with st.sidebar:
                     st.success(f"✅ 표에 반영 완료! (작성일: {survey_date}, 합계: {total_sum}점, 평균: {avg_score}점)")
                     st.rerun()
 
+    # 사이드바 하단 물리 DB 관리 패널
+    st.markdown("---")
+    st.markdown("#### 💾 물리 DB 관리")
+    if os.path.exists(DB_FILE):
+        with open(DB_FILE, "rb") as f_sidebar_db:
+            db_raw = f_sidebar_db.read()
+        st.download_button(
+            label="💾 물리 DB (.db) 백업 다운로드",
+            data=db_raw,
+            file_name=f"survey_backup_{datetime.datetime.now().strftime('%Y%m%d_%H%M%S')}.db",
+            mime="application/x-sqlite3",
+            use_container_width=True,
+            help="현재 물리 데이터베이스(SQLite survey.db) 원본 파일을 PC로 백업 다운로드합니다."
+        )
+
 # -------------------------------------------------------------
 # 5. 메인 화면: 실시간 누적 집계표 및 요약 통계
 # -------------------------------------------------------------
 st.markdown('<div class="main-title">📊 지류 만족도 조사 실시간 집계 대시보드</div>', unsafe_allow_html=True)
 st.markdown('<div class="sub-title">종이로 수합된 설문지를 등록하고 실시간 누적 결과 및 요약 통계를 모니터링합니다.</div>', unsafe_allow_html=True)
 
-if is_gsheets_enabled():
-    st.markdown('<div style="margin-bottom: 12px;"><span style="background-color:#DCFCE7; color:#166534; padding:4px 12px; border-radius:12px; font-size:0.85rem; font-weight:600;">🟢 구글 스프레드시트 실시간 클라우드 연동 중</span></div>', unsafe_allow_html=True)
-else:
-    st.markdown('<div style="margin-bottom: 12px;"><span style="background-color:#F1F5F9; color:#475569; padding:4px 12px; border-radius:12px; font-size:0.85rem; font-weight:600;">💾 로컬 CSV 저장 모드 (구글 시트 설정 시 자동 전환)</span></div>', unsafe_allow_html=True)
-
 # 최신 데이터 불러오기
 df_data = load_survey_data()
 total_count = len(df_data)
+
+if is_gsheets_enabled():
+    st.markdown('<div style="margin-bottom: 12px;"><span style="background-color:#DCFCE7; color:#166534; padding:4px 12px; border-radius:12px; font-size:0.85rem; font-weight:600;">🟢 구글 스프레드시트 실시간 클라우드 연동 중</span> <span style="background-color:#EFF6FF; color:#1D4ED8; padding:4px 12px; border-radius:12px; font-size:0.85rem; font-weight:600;">💾 물리 DB (SQLite: survey.db) 영구 보관 중</span></div>', unsafe_allow_html=True)
+else:
+    st.markdown(f'<div style="margin-bottom: 12px;"><span style="background-color:#EFF6FF; color:#1D4ED8; padding:4px 12px; border-radius:12px; font-size:0.85rem; font-weight:600;">💾 물리 DB 저장 모드 (SQLite: survey.db 영구 저장 / 총 {total_count}건 보관 중)</span></div>', unsafe_allow_html=True)
 
 # 상단 KPI 지표 카드
 col1, col2, col3, col4 = st.columns(4)
@@ -857,7 +983,7 @@ st.markdown("---")
 tab1, tab2 = st.tabs(["📑 실시간 누적 집계표", "📈 세부 항목별 평균 분석"])
 
 with tab1:
-    col_filter1, col_filter2, col_down = st.columns([2.5, 1, 1.5])
+    col_filter1, col_filter2, col_down = st.columns([2.2, 0.8, 2.0])
     
     with col_filter1:
         search_query = st.text_input("🔍 발주사 / 공사명 / 담당자 / 작성일 검색", placeholder="검색어를 입력하세요...")
@@ -865,7 +991,7 @@ with tab1:
     with col_down:
         st.write("") # 줄맞춤 여백
         if total_count > 0:
-            col_d1, col_d2 = st.columns(2)
+            col_d1, col_d2, col_d3 = st.columns(3)
             with col_d1:
                 excel_bytes = get_excel_download_bytes(df_data)
                 st.download_button(
@@ -886,6 +1012,19 @@ with tab1:
                     mime="text/csv",
                     use_container_width=True,
                     help="UTF-8-SIG BOM이 포함된 CSV 파일로 다운로드합니다."
+                )
+            with col_d3:
+                db_bytes = b""
+                if os.path.exists(DB_FILE):
+                    with open(DB_FILE, "rb") as f_db:
+                        db_bytes = f_db.read()
+                st.download_button(
+                    label="💾 DB (.db)",
+                    data=db_bytes,
+                    file_name=f"survey_{datetime.datetime.now().strftime('%Y%m%d_%H%M%S')}.db",
+                    mime="application/x-sqlite3",
+                    use_container_width=True,
+                    help="SQLite 물리 데이터베이스 원본 파일(survey.db)을 다운로드합니다."
                 )
         else:
             st.button("📥 엑셀 다운로드", disabled=True, use_container_width=True)
