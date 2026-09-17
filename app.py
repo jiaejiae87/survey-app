@@ -74,8 +74,10 @@ ALL_COLUMNS = [
 def is_gsheets_enabled() -> bool:
     """Streamlit Secrets에 gsheets 설정이 존재하는지 확인합니다."""
     try:
-        return "connections" in st.secrets and "gsheets" in st.secrets["connections"]
-    except Exception:
+        if hasattr(st, "secrets") and "connections" in st.secrets:
+            return "gsheets" in st.secrets["connections"]
+        return False
+    except BaseException:
         return False
 
 def get_gsheets_connection():
@@ -83,7 +85,7 @@ def get_gsheets_connection():
     try:
         from streamlit_gsheets import GSheetsConnection
         return st.connection("gsheets", type=GSheetsConnection)
-    except Exception:
+    except BaseException:
         return None
 
 def load_survey_data() -> pd.DataFrame:
@@ -101,7 +103,7 @@ def load_survey_data() -> pd.DataFrame:
                             df[col] = None
                     df = df.dropna(subset=["발주사", "공사명"], how="all")
                     return df[ALL_COLUMNS].reset_index(drop=True)
-        except Exception as e:
+        except BaseException as e:
             st.warning(f"구글 시트 읽기 실패 (로컬 CSV로 대체합니다): {e}")
 
     # 2. 로컬 CSV 파일 로드 (기본)
