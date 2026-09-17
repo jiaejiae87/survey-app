@@ -58,6 +58,7 @@ SCORE_COLUMNS = [
 
 ALL_COLUMNS = [
     "등록일시",
+    "작성일",
     "발주사",
     "공사명",
     "계약기간",
@@ -255,6 +256,7 @@ def parse_survey_text(text: str) -> dict:
         "발주사": "",
         "공사명": "",
         "계약기간": "",
+        "작성일": "",
         "담당자소속": "",
         "담당자이름": "",
         "소통_설명및협의": 5,
@@ -271,11 +273,12 @@ def parse_survey_text(text: str) -> dict:
 
     lines = [line.strip() for line in text.splitlines() if line.strip()]
 
-    # 1. 기본 정보 정밀 파싱 (발주처->발주사, 소속->담당자소속, 작성자->담당자이름)
+    # 1. 기본 정보 정밀 파싱 (발주처->발주사, 소속->담당자소속, 작성자->담당자이름, 작성일자->작성일)
     keywords = [
         ("발주사", ["발주처", "발주사", "고객사", "원청사", "업체명", "회사명"]),
         ("공사명", ["공사명", "사업명", "프로젝트명", "현장명", "건명", "계약건명"]),
         ("계약기간", ["계약기간", "공사기간", "공기", "기간"]),
+        ("작성일", ["작성일자", "작성일", "평가일자", "평가일", "작성일시", "제출일", "날짜"]),
         ("담당자소속", ["소속", "담당자소속", "담당자 소속", "부서", "담당부서"]),
         ("담당자이름", ["작성자", "담당자이름", "담당자 이름", "담당자명", "성명", "성함", "평가자"])
     ]
@@ -321,6 +324,7 @@ def parse_survey_text(text: str) -> dict:
         "발주사": [r"(?:발주처|발주사|고객사)\s*[:：\-]?\s*([^\n\r,]+)"],
         "공사명": [r"(?:공사명|사업명|현장명)\s*[:：\-]?\s*([^\n\r,]+)"],
         "계약기간": [r"(?:계약기간|공사기간|기간)\s*[:：\-]?\s*([0-9]{4}[.\-/년\s0-9~동일]+)"],
+        "작성일": [r"(?:작성일자|작성일|평가일자|평가일|작성일시|제출일|날짜)\s*[:：\-]?\s*([0-9]{4}[.\-/년\s0-9월일]+)"],
         "담당자소속": [r"(?:소속|부서|담당부서)\s*[:：\-]?\s*([^\n\r,]+)"],
         "담당자이름": [r"(?:작성자|성명|담당자명|성함)\s*[:：\-]?\s*([^\n\r,]+)"]
     }
@@ -334,6 +338,16 @@ def parse_survey_text(text: str) -> dict:
                     if val:
                         result[field] = val
                         break
+
+    # 2-1. 문서 하단 등 단독 날짜 탐색 (계약기간 외 단독 작성일자)
+    if not result["작성일"]:
+        date_pattern = r"(202[0-9][.\-/년]\s*[0-9]{1,2}[.\-/월]\s*[0-9]{1,2}일?)"
+        for line in lines:
+            if "~" not in line and "동일" not in line:
+                m = re.search(date_pattern, line)
+                if m:
+                    result["작성일"] = m.group(1).strip()
+                    break
 
     # 3. 7개 평가 항목 점수 인식 (키워드 탐색 및 1~5점 검출)
     score_keywords = {
@@ -414,7 +428,7 @@ with st.sidebar:
             btn_ocr = st.button("🔍 문서 내용 읽어서 폼에 반영하기", type="primary", use_container_width=True)
         with col_ocr_reset:
             if st.button("초기화", use_container_width=True, help="자동 입력된 내용을 비웁니다"):
-                for k in ["auto_client", "auto_project", "auto_period", "auto_dept", "auto_name", "ocr_text", "auto_scores"]:
+                for k in ["auto_client", "auto_project", "auto_period", "auto_date", "auto_dept", "auto_name", "ocr_text", "auto_scores"]:
                     st.session_state.pop(k, None)
                 st.rerun()
 
@@ -426,6 +440,7 @@ with st.sidebar:
                     st.session_state["auto_client"] = parsed.get("발주사", "")
                     st.session_state["auto_project"] = parsed.get("공사명", "")
                     st.session_state["auto_period"] = parsed.get("계약기간", "")
+                    st.session_state["auto_date"] = parsed.get("작성일", "")
                     st.session_state["auto_dept"] = parsed.get("담당자소속", "")
                     st.session_state["auto_name"] = parsed.get("담당자이름", "")
                     st.session_state["auto_scores"] = {
@@ -449,6 +464,7 @@ with st.sidebar:
     default_client = st.session_state.get("auto_client", "")
     default_project = st.session_state.get("auto_project", "")
     default_period = st.session_state.get("auto_period", "")
+    default_date = st.session_state.get("auto_date", "")
     default_dept = st.session_state.get("auto_dept", "")
     default_name = st.session_state.get("auto_name", "")
     saved_scores = st.session_state.get("auto_scores", {})
@@ -458,6 +474,11 @@ with st.sidebar:
         st.markdown("**[1] 공사 및 담당자 정보**")
         client = st.text_input("발주사 (발주처) *", value=default_client, placeholder="예: (주)한국건설").strip()
         project_name = st.text_input("공사명 *", value=default_project, placeholder="예: 신축 물류센터 전기공사").strip()
+        survey_date = st.text_input(
+            "작성일 (작성일자)",
+            value=default_date if default_date else datetime.date.today().strftime("%Y-%m-%d"),
+            placeholder="예: 2026-09-17"
+        ).strip()
         period = st.text_input("계약기간 (공사기간)", value=default_period, placeholder="예: 2026.01.01 ~ 2026.06.30").strip()
         dept = st.text_input("담당자 소속 (소속)", value=default_dept, placeholder="예: 시설관리팀").strip()
         manager_name = st.text_input("담당자 이름 (작성자)", value=default_name, placeholder="예: 홍길동 팀장").strip()
@@ -536,6 +557,7 @@ with st.sidebar:
 
                 new_data = {
                     "등록일시": now_str,
+                    "작성일": survey_date,
                     "발주사": client,
                     "공사명": project_name,
                     "계약기간": period,
@@ -553,9 +575,9 @@ with st.sidebar:
                 }
 
                 if save_survey_entry(new_data):
-                    for k in ["auto_client", "auto_project", "auto_period", "auto_dept", "auto_name", "ocr_text", "auto_scores"]:
+                    for k in ["auto_client", "auto_project", "auto_period", "auto_date", "auto_dept", "auto_name", "ocr_text", "auto_scores"]:
                         st.session_state.pop(k, None)
-                    st.success(f"✅ 표에 반영 완료! (합계: {total_sum}점, 평균: {avg_score}점)")
+                    st.success(f"✅ 표에 반영 완료! (작성일: {survey_date}, 합계: {total_sum}점, 평균: {avg_score}점)")
                     st.rerun()
 
 # -------------------------------------------------------------
@@ -604,7 +626,7 @@ with tab1:
     col_filter1, col_filter2, col_down = st.columns([2.5, 1, 1.5])
     
     with col_filter1:
-        search_query = st.text_input("🔍 발주사 / 공사명 / 담당자 검색", placeholder="검색어를 입력하세요...")
+        search_query = st.text_input("🔍 발주사 / 공사명 / 담당자 / 작성일 검색", placeholder="검색어를 입력하세요...")
     
     with col_down:
         st.write("") # 줄맞춤 여백
@@ -627,7 +649,8 @@ with tab1:
         mask = (
             filtered_df["발주사"].astype(str).str.contains(search_query, case=False, na=False) |
             filtered_df["공사명"].astype(str).str.contains(search_query, case=False, na=False) |
-            filtered_df["담당자이름"].astype(str).str.contains(search_query, case=False, na=False)
+            filtered_df["담당자이름"].astype(str).str.contains(search_query, case=False, na=False) |
+            filtered_df["작성일"].astype(str).str.contains(search_query, case=False, na=False)
         )
         filtered_df = filtered_df[mask]
 
@@ -642,6 +665,7 @@ with tab1:
             selection_mode="single-row",
             column_config={
                 "등록일시": st.column_config.TextColumn("등록일시", width="medium"),
+                "작성일": st.column_config.TextColumn("작성일", width="small"),
                 "발주사": st.column_config.TextColumn("발주사", width="small"),
                 "공사명": st.column_config.TextColumn("공사명", width="medium"),
                 "계약기간": st.column_config.TextColumn("계약기간", width="medium"),
@@ -677,7 +701,7 @@ with tab1:
 
                 with st.container():
                     st.warning(
-                        f"선택한 설문: **[{target_item['등록일시']}] {target_item['발주사']} - {target_item['공사명']} (담당: {target_item['담당자이름']})**"
+                        f"선택한 설문: **[{target_item.get('작성일', target_item['등록일시'])}] {target_item['발주사']} - {target_item['공사명']} (담당: {target_item['담당자이름']})**"
                     )
                     col_del_btn, col_del_space = st.columns([2.5, 7.5])
                     with col_del_btn:
@@ -689,7 +713,7 @@ with tab1:
         # 또는 하단 드롭다운 목록에서 번호로 골라 삭제할 수 있는 보조 기능
         with st.expander("🗑️ 목록에서 직접 골라서 삭제하기"):
             item_options = {
-                idx: f"[{idx + 1}번] {row['등록일시']} | {row['발주사']} - {row['공사명']} ({row['담당자이름']})"
+                idx: f"[{idx + 1}번] 작성일: {row.get('작성일', '-')} | {row['발주사']} - {row['공사명']} ({row['담당자이름']})"
                 for idx, row in df_data.iterrows()
             }
             chosen_row_idx = st.selectbox(
