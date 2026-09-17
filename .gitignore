@@ -1,0 +1,15 @@
+# Python virtual environment
+.venv/
+venv/
+env/
+
+# Python cache
+__pycache__/
+*.py[cod]
+
+# Streamlit secrets (보안 정보)
+.streamlit/secrets.toml
+
+# System files
+.DS_Store
+Thumbs.db
