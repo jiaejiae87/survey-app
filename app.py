@@ -90,13 +90,14 @@ def get_gsheets_connection():
         return None
 
 def load_survey_data() -> pd.DataFrame:
-    """구글 스프레드시트 또는 로컬 CSV 파일에서 누적된 설문 데이터를 불러옵니다."""
+    """구글 스프레드시트 또는 로컬 CSV 파일에서 누적된 설문 데이터를 불러옵니다 (실시간 반영)."""
     # 1. 구글 스프레드시트 연동 활성화 시 우선 로드
     if is_gsheets_enabled():
         try:
             conn = get_gsheets_connection()
             if conn:
-                df = conn.read(ttl=3) # 3초 캐시로 빠른 실시간 반응
+                # ttl=0 으로 즉시 최신 데이터 반영 (캐시 지연 방지)
+                df = conn.read(ttl=0)
                 if df is not None and not df.empty:
                     # 필수 컬럼 보정
                     for col in ALL_COLUMNS:
@@ -105,7 +106,7 @@ def load_survey_data() -> pd.DataFrame:
                     df = df.dropna(subset=["발주사", "공사명"], how="all")
                     return df[ALL_COLUMNS].reset_index(drop=True)
         except BaseException as e:
-            st.warning(f"구글 시트 읽기 실패 (로컬 CSV로 대체합니다): {e}")
+            st.warning(f"구글 시트 읽기 알림 (로컬 파일로 대체): {e}")
 
     # 2. 로컬 CSV 파일 로드 (기본)
     if os.path.exists(CSV_FILE):
@@ -139,7 +140,7 @@ def save_survey_entry(entry_dict: dict) -> bool:
     except Exception as e:
         st.warning(f"로컬 파일 저장 알림: {e}")
 
-    # 2. 구글 스프레드시트 연동 시 클라우드 시트에 동기화
+    # 2. 구글 스프레드시트 연동 시 클라우드 시트에 실시간 동기화
     if is_gsheets_enabled():
         try:
             conn = get_gsheets_connection()
@@ -148,26 +149,31 @@ def save_survey_entry(entry_dict: dict) -> bool:
                 if current_df is None or current_df.empty:
                     updated_df = df_new[ALL_COLUMNS]
                 else:
+                    current_df = current_df.dropna(subset=["발주사", "공사명"], how="all")
                     updated_df = pd.concat([current_df, df_new], ignore_index=True)[ALL_COLUMNS]
                 conn.update(data=updated_df)
+                st.cache_data.clear()
                 return True
         except Exception as e:
             st.error(f"구글 시트 저장 실패: {e}")
             return csv_saved
 
+    st.cache_data.clear()
     return csv_saved
 
-def delete_survey_entry(row_index: int) -> bool:
-    """구글 시트 및 로컬 CSV에서 지정된 인덱스의 데이터를 삭제합니다."""
+def delete_survey_entry(target_datetime: str, target_project: str = None) -> bool:
+    """구글 시트 및 로컬 CSV에서 고유 등록일시와 공사명으로 데이터를 안전하게 실시간 삭제합니다."""
     # 1. 로컬 CSV에서 삭제
     try:
         if os.path.exists(CSV_FILE):
             df = pd.read_csv(CSV_FILE, encoding="utf-8-sig")
-            if 0 <= row_index < len(df):
-                df = df.drop(index=row_index).reset_index(drop=True)
-                df.to_csv(CSV_FILE, index=False, encoding="utf-8-sig")
-    except Exception:
-        pass
+            if target_project:
+                df = df[~((df["등록일시"].astype(str) == str(target_datetime)) & (df["공사명"].astype(str) == str(target_project)))]
+            else:
+                df = df[df["등록일시"].astype(str) != str(target_datetime)]
+            df.to_csv(CSV_FILE, index=False, encoding="utf-8-sig")
+    except Exception as ex:
+        st.warning(f"로컬 삭제 알림: {ex}")
 
     # 2. 구글 시트에서 삭제
     if is_gsheets_enabled():
@@ -175,24 +181,30 @@ def delete_survey_entry(row_index: int) -> bool:
             conn = get_gsheets_connection()
             if conn:
                 df = conn.read(ttl=0)
-                if df is not None and 0 <= row_index < len(df):
-                    df = df.drop(index=row_index).reset_index(drop=True)[ALL_COLUMNS]
-                    conn.update(data=df)
+                if df is not None and not df.empty:
+                    df = df.dropna(subset=["발주사", "공사명"], how="all")
+                    if target_project:
+                        df = df[~((df["등록일시"].astype(str) == str(target_datetime)) & (df["공사명"].astype(str) == str(target_project)))]
+                    else:
+                        df = df[df["등록일시"].astype(str) != str(target_datetime)]
+                    conn.update(data=df[ALL_COLUMNS].reset_index(drop=True))
+                    st.cache_data.clear()
                     return True
         except Exception as e:
             st.error(f"구글 시트 삭제 오류: {e}")
             return False
 
+    st.cache_data.clear()
     return True
 
 # -------------------------------------------------------------
-# 3. PDF / 이미지 뷰어 헬퍼 함수
+# 3. PDF / 이미지 뷰어 & 듀얼 OCR 엔진 (Windows WinOCR + Linux Tesseract)
 # -------------------------------------------------------------
 def get_pdf_page_images(pdf_bytes):
     """PyMuPDF(fitz)를 이용해 PDF 각 페이지를 PIL 이미지 리스트로 변환합니다."""
     try:
-        import fitz  # PyMuPDF
-        doc = fitz.open(stream=pdf_bytes, filetype="pdf")
+        import pymupdf
+        doc = pymupdf.open(stream=pdf_bytes, filetype="pdf")
         page_images = []
         for page_idx in range(len(doc)):
             page = doc.load_page(page_idx)
@@ -205,8 +217,45 @@ def get_pdf_page_images(pdf_bytes):
         st.warning(f"PDF 미리보기 변환 중 알림: {e}")
         return None
 
+def ocr_image(img: Image.Image) -> str:
+    """Windows에서는 WinOCR, Linux/클라우드에서는 Tesseract(pytesseract)를 지원하는 듀얼 엔진"""
+    # 1. Windows 환경 우선 시도 (winocr)
+    try:
+        import winocr
+        res = winocr.recognize_pil_sync(img, lang="ko")
+        if "lines" in res and res["lines"]:
+            return "\n".join([line.get("text", "") for line in res["lines"] if line.get("text")])
+        if res.get("text"):
+            return res.get("text", "")
+    except Exception:
+        pass
+
+    # 2. Linux / Streamlit Cloud 환경 시도 (pytesseract)
+    try:
+        import pytesseract
+        from PIL import ImageEnhance
+        gray = img.convert("L")
+        enhanced = ImageEnhance.Contrast(gray).enhance(1.8)
+        try:
+            text = pytesseract.image_to_string(enhanced, lang="kor+eng")
+            if text and text.strip():
+                return text
+        except Exception:
+            pass
+        try:
+            text = pytesseract.image_to_string(img, lang="kor")
+            if text and text.strip():
+                return text
+        except Exception:
+            pass
+        return pytesseract.image_to_string(img)
+    except Exception:
+        pass
+
+    return ""
+
 def extract_text_from_file(uploaded_file) -> str:
-    """PDF 또는 이미지 파일에서 텍스트를 추출합니다 (디지털 텍스트 + Windows 로컬 OCR)."""
+    """PDF 또는 이미지 파일에서 텍스트를 추출합니다 (디지털 텍스트 + 듀얼 OCR)."""
     try:
         uploaded_file.seek(0)
         file_bytes = uploaded_file.read()
@@ -215,40 +264,26 @@ def extract_text_from_file(uploaded_file) -> str:
         full_text = ""
 
         if file_ext == "pdf":
-            import fitz  # PyMuPDF
-            doc = fitz.open(stream=file_bytes, filetype="pdf")
+            import pymupdf
+            doc = pymupdf.open(stream=file_bytes, filetype="pdf")
             for page in doc:
                 text = page.get_text()
                 if text and text.strip():
                     full_text += text + "\n"
 
-            # 디지털 텍스트가 없는 스캔본 PDF인 경우 Windows 로컬 OCR 수행
+            # 디지털 텍스트가 없는 스캔본 PDF인 경우 OCR 수행
             if not full_text.strip():
-                try:
-                    import winocr
-                    for page_idx in range(len(doc)):
-                        page = doc.load_page(page_idx)
-                        pix = page.get_pixmap(dpi=200)
-                        img = Image.open(io.BytesIO(pix.tobytes("png")))
-                        res = winocr.recognize_pil_sync(img, lang="ko")
-                        if "lines" in res and res["lines"]:
-                            full_text += "\n".join([line.get("text", "") for line in res["lines"] if line.get("text")]) + "\n"
-                        else:
-                            full_text += res.get("text", "") + "\n"
-                except Exception:
-                    pass
+                for page_idx in range(len(doc)):
+                    page = doc.load_page(page_idx)
+                    pix = page.get_pixmap(dpi=200)
+                    img = Image.open(io.BytesIO(pix.tobytes("png")))
+                    ocr_res = ocr_image(img)
+                    if ocr_res:
+                        full_text += ocr_res + "\n"
 
         elif file_ext in ["png", "jpg", "jpeg"]:
-            try:
-                import winocr
-                img = Image.open(io.BytesIO(file_bytes))
-                res = winocr.recognize_pil_sync(img, lang="ko")
-                if "lines" in res and res["lines"]:
-                    full_text = "\n".join([line.get("text", "") for line in res["lines"] if line.get("text")])
-                else:
-                    full_text = res.get("text", "")
-            except Exception:
-                pass
+            img = Image.open(io.BytesIO(file_bytes))
+            full_text = ocr_image(img)
 
         return full_text.strip()
     except Exception as ex:
@@ -706,7 +741,8 @@ with tab1:
             sel_idx = selected_rows[0]
             if sel_idx < len(filtered_df):
                 target_item = filtered_df.iloc[sel_idx]
-                target_orig_idx = filtered_df.index[sel_idx]
+                target_dt = str(target_item["등록일시"])
+                target_proj = str(target_item["공사명"])
 
                 with st.container():
                     st.warning(
@@ -715,17 +751,18 @@ with tab1:
                     col_del_btn, col_del_space = st.columns([2.5, 7.5])
                     with col_del_btn:
                         if st.button("🗑️ 선택한 이 행 삭제하기", type="primary", use_container_width=True, key="btn_table_delete"):
-                            if delete_survey_entry(target_orig_idx):
-                                st.success("삭제 완료! 화면을 새로고침합니다...")
+                            if delete_survey_entry(target_dt, target_proj):
+                                st.cache_data.clear()
+                                st.success("✅ 실시간 삭제 완료! 화면을 갱신합니다...")
                                 st.rerun()
 
         # 또는 하단 드롭다운 목록에서 번호로 골라 삭제할 수 있는 보조 기능
         with st.expander("🗑️ 목록에서 직접 골라서 삭제하기"):
             item_options = {
-                idx: f"[{idx + 1}번] 작성일: {row.get('작성일', '-')} | {row['발주사']} - {row['공사명']} ({row['담당자이름']})"
+                str(row["등록일시"]): f"[{idx + 1}번] 작성일: {row.get('작성일', '-')} | {row['발주사']} - {row['공사명']} ({row['담당자이름']})"
                 for idx, row in df_data.iterrows()
             }
-            chosen_row_idx = st.selectbox(
+            chosen_dt = st.selectbox(
                 "삭제할 설문 항목을 선택하세요:",
                 options=list(item_options.keys()),
                 format_func=lambda x: item_options[x],
@@ -734,8 +771,9 @@ with tab1:
             col_drop_del, _ = st.columns([2.5, 7.5])
             with col_drop_del:
                 if st.button("🗑️ 선택한 항목 영구 삭제", type="primary", use_container_width=True, key="btn_dropdown_delete"):
-                    if delete_survey_entry(chosen_row_idx):
-                        st.success("삭제 완료! 화면을 새로고침합니다...")
+                    if delete_survey_entry(chosen_dt):
+                        st.cache_data.clear()
+                        st.success("✅ 실시간 삭제 완료! 화면을 갱신합니다...")
                         st.rerun()
 
     else:
