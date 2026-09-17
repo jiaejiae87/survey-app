@@ -48,13 +48,46 @@ CSV_FILE = "survey_data.csv"
 
 SCORE_COLUMNS = [
     "소통_설명및협의",
-    "소통_공사기간준수",
-    "품질_계약내용실행",
-    "품질_설계개선",
-    "안전_안전사고예방",
+    "품질_기간준수",
+    "품질_내용준수",
+    "품질_개선",
+    "안전_사고예방",
     "기타_민원관리",
-    "종합_전반적만족도"
+    "종합_전체만족도"
 ]
+
+SCORE_DISPLAY_NAMES = {
+    "소통_설명및협의": "소통:설명및협의",
+    "품질_기간준수": "품질:기간준수",
+    "품질_내용준수": "품질:내용준수",
+    "품질_개선": "품질:개선",
+    "안전_사고예방": "안전:사고예방",
+    "기타_민원관리": "기타:민원관리",
+    "종합_전체만족도": "종합:전체만족도"
+}
+
+# 구버전 컬럼명 및 다양한 표기법 호환 매핑 테이블 (구글 시트 및 기존 CSV 호환)
+LEGACY_COLUMN_MAP = {
+    "소통_공사기간준수": "품질_기간준수",
+    "품질_계약내용실행": "품질_내용준수",
+    "품질_설계개선": "품질_개선",
+    "품질_설계계선": "품질_개선",
+    "안전_안전사고예방": "안전_사고예방",
+    "종합_전반적만족도": "종합_전체만족도",
+    "소통:설명협의": "소통_설명및협의",
+    "소통:설명및협의": "소통_설명및협의",
+    "소통:공기준수": "품질_기간준수",
+    "품질:기간준수": "품질_기간준수",
+    "품질:계약실행": "품질_내용준수",
+    "품질:내용준수": "품질_내용준수",
+    "품질:설계개선": "품질_개선",
+    "품질:설계계선": "품질_개선",
+    "품질:개선": "품질_개선",
+    "안전:사고예방": "안전_사고예방",
+    "기타:민원관리": "기타_민원관리",
+    "종합:전반만족": "종합_전체만족도",
+    "종합:전체만족도": "종합_전체만족도"
+}
 
 ALL_COLUMNS = [
     "등록일시",
@@ -89,6 +122,30 @@ def get_gsheets_connection():
     except BaseException:
         return None
 
+def get_excel_download_bytes(df: pd.DataFrame) -> bytes:
+    """한글 깨짐 없는 정식 엑셀 파일(.xlsx)을 열 너비 자동 조정과 함께 생성합니다."""
+    output = io.BytesIO()
+    export_df = df.copy()
+    # 점수 컬럼을 친절한 표시명(소통:설명및협의 등)으로 변환
+    export_df = export_df.rename(columns=SCORE_DISPLAY_NAMES)
+    
+    with pd.ExcelWriter(output, engine="openpyxl") as writer:
+        export_df.to_excel(writer, index=False, sheet_name="만족도조사결과")
+        worksheet = writer.sheets["만족도조사결과"]
+        # 각 열 너비 자동 최적화
+        for col in worksheet.columns:
+            col_letter = col[0].column_letter
+            max_len = 0
+            for cell in col:
+                if cell.value is not None:
+                    val_str = str(cell.value)
+                    w = sum(2 if ord(c) > 127 else 1 for c in val_str)
+                    if w > max_len:
+                        max_len = w
+            worksheet.column_dimensions[col_letter].width = max(max_len + 4, 12)
+            
+    return output.getvalue()
+
 def load_survey_data() -> pd.DataFrame:
     """구글 스프레드시트 또는 로컬 CSV 파일에서 누적된 설문 데이터를 불러옵니다 (실시간 반영)."""
     # 1. 구글 스프레드시트 연동 활성화 시 우선 로드
@@ -99,6 +156,8 @@ def load_survey_data() -> pd.DataFrame:
                 # ttl=0 으로 즉시 최신 데이터 반영 (캐시 지연 방지)
                 df = conn.read(ttl=0)
                 if df is not None and not df.empty:
+                    # 구버전 컬럼명 호환 변환
+                    df = df.rename(columns=LEGACY_COLUMN_MAP)
                     # 필수 컬럼 보정
                     for col in ALL_COLUMNS:
                         if col not in df.columns:
@@ -112,6 +171,8 @@ def load_survey_data() -> pd.DataFrame:
     if os.path.exists(CSV_FILE):
         try:
             df = pd.read_csv(CSV_FILE, encoding="utf-8-sig")
+            # 구버전 컬럼명 호환 변환
+            df = df.rename(columns=LEGACY_COLUMN_MAP)
             for col in ALL_COLUMNS:
                 if col not in df.columns:
                     df[col] = None
@@ -254,8 +315,39 @@ def ocr_image(img: Image.Image) -> str:
 
     return ""
 
+def ocr_image_dual_pass(img: Image.Image) -> str:
+    """
+    일반 업스케일링 1차 패스와 하단 인감 도장(적색 직인) 제거 2차 패스를 결합한 지능형 OCR
+    (도장에 가려진 작성자 이름 '탁은정' 및 소속명 선명 인식)
+    """
+    import numpy as np
+    
+    rgb_img = img.convert("RGB")
+    w, h = rgb_img.size
+    
+    # 1차 패스: 텍스트 뭉개짐 방지를 위해 해상도 2배 보정 후 전체 인식
+    scale = 2 if w < 1600 else 1
+    im1 = rgb_img.resize((w * scale, h * scale), Image.Resampling.LANCZOS) if scale > 1 else rgb_img
+    pass1_text = ocr_image(im1)
+    
+    # 2차 패스: 하단 직인(서명/도장) 영역 적색 채널 필터링 (도장 지우고 검정 텍스트 복원)
+    pass2_text = ""
+    try:
+        footer = rgb_img.crop((0, int(h * 0.65), w, h))
+        arr = np.array(footer)
+        r_chan = arr[:, :, 0]
+        # 적색 인감 도장은 Red 채널에서 밝은 흰색(>180)이 되므로 임계값(120)으로 완벽 제거
+        bin_f = np.where(r_chan < 120, 0, 255).astype(np.uint8)
+        footer_clean = Image.fromarray(bin_f).convert("RGB")
+        footer_2x = footer_clean.resize((footer_clean.width * 2, footer_clean.height * 2), Image.Resampling.LANCZOS)
+        pass2_text = ocr_image(footer_2x)
+    except Exception:
+        pass
+        
+    return f"{pass1_text}\n---FOOTER_CLEAN---\n{pass2_text}"
+
 def extract_text_from_file(uploaded_file) -> str:
-    """PDF 또는 이미지 파일에서 텍스트를 추출합니다 (디지털 텍스트 + 듀얼 OCR)."""
+    """PDF 또는 이미지 파일에서 텍스트를 추출합니다 (디지털 텍스트 + 듀얼 패스 OCR)."""
     try:
         uploaded_file.seek(0)
         file_bytes = uploaded_file.read()
@@ -277,13 +369,13 @@ def extract_text_from_file(uploaded_file) -> str:
                     page = doc.load_page(page_idx)
                     pix = page.get_pixmap(dpi=200)
                     img = Image.open(io.BytesIO(pix.tobytes("png")))
-                    ocr_res = ocr_image(img)
+                    ocr_res = ocr_image_dual_pass(img)
                     if ocr_res:
                         full_text += ocr_res + "\n"
 
         elif file_ext in ["png", "jpg", "jpeg"]:
             img = Image.open(io.BytesIO(file_bytes))
-            full_text = ocr_image(img)
+            full_text = ocr_image_dual_pass(img)
 
         return full_text.strip()
     except Exception as ex:
@@ -301,100 +393,162 @@ def parse_survey_text(text: str) -> dict:
         "담당자소속": "",
         "담당자이름": "",
         "소통_설명및협의": 5,
-        "소통_공사기간준수": 5,
-        "품질_계약내용실행": 5,
-        "품질_설계개선": 5,
-        "안전_안전사고예방": 5,
+        "품질_기간준수": 5,
+        "품질_내용준수": 5,
+        "품질_개선": 5,
+        "안전_사고예방": 5,
         "기타_민원관리": 5,
-        "종합_전반적만족도": 5
+        "종합_전체만족도": 5
     }
 
     if not text:
         return result
 
-    lines = [line.strip() for line in text.splitlines() if line.strip()]
-
-    # 1. 공사명 (공 사 명, 사업명, 프로젝트명 등 자간 띄어쓰기 대응)
-    m_proj = re.search(r'(?:공\s*사\s*명|사\s*업\s*명|프\s*로\s*젝\s*트\s*명|현\s*장\s*명|건\s*명|계\s*약\s*건\s*명)\s*[:：\-]?\s*([^\n\r]+?)(?=\s*[0-9O○●•*·-]*\s*발\s*주\s*(?:처|사)|\s*[0-9O○●•*·-]*\s*공\s*사\s*기\s*간|[\r\n]|$)', text)
-    if m_proj:
-        val = re.sub(r'^[:：\-\s|]+', '', m_proj.group(1)).strip()
-        val = re.sub(r'[:：,;|]+$', '', val).strip()
-        result['공사명'] = val
-
-    # 2. 발주사 (발 주 처, 발 주 사, 고객사, 원청사 등 자간 띄어쓰기 대응)
-    m_client = re.search(r'(?:발\s*주\s*(?:처|사)|고\s*객\s*사|원\s*청\s*사|업\s*체\s*명|회\s*사\s*명)\s*[:：\-]?\s*([^\n\r]+?)(?=\s*[0-9O○●•*·-]*\s*공\s*사\s*기\s*간|\s*[0-9O○●•*·-]*\s*계\s*약\s*기\s*간|[\r\n]|$)', text)
-    if m_client:
-        val = re.sub(r'^[:：\-\s|]+', '', m_client.group(1)).strip()
-        val = re.sub(r'[:：,;|]+$', '', val).strip()
-        result['발주사'] = val
-
-    # 3. 계약기간 / 공사기간 (공 사 기 간, 계 약 기 간 등)
-    m_period = re.search(r'(?:공\s*사\s*기\s*간|계\s*약\s*기\s*간|기\s*간)\s*[:：\-]?\s*([0-9]{4}[.\-/년\s0-9~–—\-_동일]+)', text)
-    if m_period:
-        raw_period = re.sub(r'^[:：\-\s|]+', '', m_period.group(1)).strip()
-        result['계약기간'] = re.sub(r'\s*[-–—~]\s*', ' ~ ', raw_period)
+    if "---FOOTER_CLEAN---" in text:
+        main_part, footer_part = text.split("---FOOTER_CLEAN---", 1)
     else:
-        # 줄바꿈되어 다음 줄에 기간이 기재된 경우 대비
+        main_part, footer_part = text, text
+
+    lines = [line.strip() for line in main_part.splitlines() if line.strip()]
+    footer_lines = [line.strip() for line in footer_part.splitlines() if line.strip()]
+
+    # 1. 공사명 (공 사 명, 사업명, 프로젝트명 등 자간 띄어쓰기 및 줄바꿈 대응)
+    m_proj = re.search(r'(?:공\s*사\s*명|사\s*업\s*명|프\s*로\s*젝\s*트\s*명|현\s*장\s*명|건\s*명|계\s*약\s*건\s*명)\s*[:：\-]?\s*([^\n\r]+?)(?=\s*[0-9O○●•*·-]*\s*발\s*주\s*(?:처|사)|\s*[0-9O○●•*·-]*\s*공\s*사\s*기\s*간|[\r\n]|$)', main_part)
+    if m_proj:
+        val = re.sub(r'^[:：\-\s|•*·○●0-9]+', '', m_proj.group(1)).strip()
+        val = re.sub(r'[:：,;|]+$', '', val).strip()
+        if len(re.findall(r'[가-힣]', val)) >= 2:
+            result['공사명'] = val
+    if not result['공사명']:
         for i, line in enumerate(lines):
-            if re.search(r'(?:공\s*사\s*기\s*간|계\s*약\s*기\s*간)', line):
-                if i + 1 < len(lines):
-                    next_line = lines[i + 1]
-                    m_next = re.search(r'([0-9]{4}[.\-/년\s]+[0-9]{1,2}[.\-/월\s]+[0-9]{1,2}[일\s]*[~\-–—\s]+[0-9]{4}[.\-/년\s]+[0-9]{1,2}[.\-/월\s]+[0-9]{1,2}[일\s]*)', next_line)
-                    if m_next:
-                        result['계약기간'] = re.sub(r'\s*[-–—~]\s*', ' ~ ', m_next.group(1)).strip()
+            if re.search(r'^(?:[0-9O○●•*·-]*\s*)?(?:공\s*사\s*명|사\s*업\s*명)', line):
+                after = re.sub(r'^(?:[0-9O○●•*·-]*\s*)?(?:공\s*사\s*명|사\s*업\s*명)\s*[:：\-]?', '', line).strip()
+                if len(re.findall(r'[가-힣]', after)) >= 2:
+                    result['공사명'] = after
+                    break
+                elif i + 1 < len(lines):
+                    next_l = lines[i + 1]
+                    if not any(k in next_l for k in ['발주', '기간', '평가']):
+                        result['공사명'] = next_l.strip()
                         break
 
-    # 계약기간에서 종료일(준공일) 계산 -> 작성일 후보로 활용
-    end_date = ''
-    if result['계약기간']:
+    # 2. 발주사 (발 주 처, 발 주 사, 고객사, 원청사 등 대응)
+    m_client = re.search(r'(?:발\s*주\s*(?:처|사)|고\s*객\s*사|원\s*청\s*사|업\s*체\s*명|회\s*사\s*명)\s*[:：\-]?\s*([^\n\r]+?)(?=\s*[0-9O○●•*·-]*\s*공\s*사\s*기\s*간|\s*[0-9O○●•*·-]*\s*계\s*약\s*기\s*간|[\r\n]|$)', main_part)
+    if m_client:
+        val = re.sub(r'^[:：\-\s|•*·○●0-9]+', '', m_client.group(1)).strip()
+        val = re.sub(r'[:：,;|]+$', '', val).strip()
+        if len(re.findall(r'[가-힣]', val)) >= 2:
+            result['발주사'] = val
+    if not result['발주사']:
+        for i, line in enumerate(lines):
+            if re.search(r'^(?:[0-9O○●•*·-]*\s*)?(?:발\s*주\s*(?:처|사))', line):
+                after = re.sub(r'^(?:[0-9O○●•*·-]*\s*)?(?:발\s*주\s*(?:처|사))\s*[:：\-]?', '', line).strip()
+                if len(re.findall(r'[가-힣]', after)) >= 2:
+                    result['발주사'] = after
+                    break
+                elif i + 1 < len(lines):
+                    next_l = lines[i + 1]
+                    if not any(k in next_l for k in ['공사기간', '계약기간', '평가']):
+                        result['발주사'] = next_l.strip()
+                        break
+    if not result['발주사']:
+        m_co = re.search(r'([가-힣]{2,}(?:수산업협동조합|협동조합|주식회사|공사|개발|건설))', main_part)
+        if m_co:
+            result['발주사'] = m_co.group(1).strip()
+
+    # 3. 계약기간 / 공사기간 (2025. 02. 06. ~ 2025. 02. 10. 마침표 및 일자 기호 대응)
+    m_period = re.search(r'(\d{4}[.\-/년\s]+\d{1,2}[.\-/월\s]+\d{1,2}[.일\s]*[~\-–—\s]+\d{4}[.\-/년\s]+\d{1,2}[.\-/월\s]+\d{1,2}[.일\s]*)', main_part)
+    if m_period:
+        raw_p = m_period.group(1).strip()
+        result['계약기간'] = re.sub(r'\s*[-–—~]\s*', ' ~ ', raw_p)
+    else:
+        for line in lines:
+            m_p = re.search(r'(\d{4}[.\-/년\s]+\d{1,2}[.\-/월\s]+\d{1,2}[.일\s]*[~\-–—\s]+\d{4}[.\-/년\s]+\d{1,2}[.\-/월\s]+\d{1,2}[.일\s]*)', line)
+            if m_p:
+                result['계약기간'] = re.sub(r'\s*[-–—~]\s*', ' ~ ', m_p.group(1)).strip()
+                break
+
+    # 4. 작성일 (작 성 일, 평가일자, 제출일 등)
+    m_date = re.search(r'(?:작\s*성\s*일(?:\s*자)?|평\s*가\s*일(?:\s*자)?|제\s*출\s*일)\s*[:：;\-]?\s*([^\n\r]+?)(?=\s*소\s*속|\s*작\s*성\s*자|점\s*/|[\r\n]|$)', footer_part + "\n" + main_part)
+    if m_date:
+        d_m = re.search(r'(\d{4})[.\-/년\s]+(\d{1,2})[.\-/월\s]+(\d{1,2})', m_date.group(1))
+        if d_m:
+            y, m, d = d_m.groups()
+            result['작성일'] = f"{int(y):04d}.{int(m):02d}.{int(d):02d}"
+    if not result['작성일'] and result['계약기간']:
         dates = re.findall(r'(\d{4})[.\-/년\s]+(\d{1,2})[.\-/월\s]+(\d{1,2})', result['계약기간'])
         if dates:
             y, m, d = dates[-1]
-            end_date = f"{int(y):04d}.{int(m):02d}.{int(d):02d}"
-
-    # 4. 작성일 (작 성 일, 평가일자, 제출일 등)
-    m_date = re.search(r'(?:작\s*성\s*일(?:\s*자)?|평\s*가\s*일(?:\s*자)?|제\s*출\s*일)\s*[:：\-]?\s*([^\n\r]+?)(?=\s*소\s*속|\s*작\s*성\s*자|점\s*/|[\r\n]|$)', text)
-    if m_date:
-        raw_date = m_date.group(1).strip()
-        d_match = re.search(r'(\d{4})[.\-/년\s]+(\d{1,2})[.\-/월\s]+(\d{1,2})', raw_date)
-        if d_match:
-            y, m, d = d_match.groups()
             result['작성일'] = f"{int(y):04d}.{int(m):02d}.{int(d):02d}"
-        elif end_date:
-            result['작성일'] = end_date
-    elif end_date:
-        result['작성일'] = end_date
 
-    # 5. 담당자 소속 (소  속, 부서, 담당부서)
-    m_dept = re.search(r'(?:소\s*속|부\s*서|담\s*당\s*부\s*서)\s*[:：\-]?\s*([^\n\r]+?)(?=\s*작\s*성\s*자|[\r\n]|$)', text)
+    # 5. 담당자 소속 (소  속, 부서, 담당부서) - 도장 제거된 하단 텍스트 우선 탐색 및 공사명/발주사 연계 보정
+    m_dept = re.search(r'(?:소\s*속|부\s*서|담\s*당\s*부\s*서|속)\s*[:：;\-]?\s*([^\n\r/|]+?)(?=\s*작\s*성\s*자|/|[\r\n]|$)', footer_part)
+    if not m_dept:
+        m_dept = re.search(r'(?:소\s*속|부\s*서|담\s*당\s*부\s*서|속)\s*[:：;\-]?\s*([^\n\r/|]+?)(?=\s*작\s*성\s*자|/|[\r\n]|$)', main_part)
+    raw_dept = ""
     if m_dept:
-        raw_dept = re.sub(r'^[:：\-\s|]+', '', m_dept.group(1)).strip()
-        hangul_chars = re.findall(r'[가-힣]', raw_dept)
-        if len(hangul_chars) >= 2:
-            result['담당자소속'] = raw_dept
-        elif result['발주사']:
-            result['담당자소속'] = result['발주사']
-    elif result['발주사']:
-        result['담당자소속'] = result['발주사']
+        raw_dept = re.sub(r'^[:：;\-\s|•*·○●]+', '', m_dept.group(1)).strip()
+        raw_dept = re.sub(r'[:：,;|]+$', '', raw_dept).strip()
+    
+    # OCR 오인식 자동 보정 (예: '금유센터', '금우새터' -> '금융센터')
+    raw_dept = re.sub(r'금[유우층구]?[센세]?[터펗]?', '금융센터', raw_dept)
+    if '금융센터' in raw_dept:
+        raw_dept = re.sub(r'(금융센터).*', r'\1', raw_dept)
+    
+    # 공사명 및 발주사와 상호 교차 대조하여 완전한 소속명 완성
+    proj = result['공사명']
+    client = result['발주사']
+    if '금융센터' in proj and '금융센터' not in raw_dept:
+        if '을지로' in proj and '을지로' in raw_dept:
+            raw_dept = re.sub(r'을지로.*', '을지로금융센터', raw_dept)
+    if client and ('협동조합' in client or '수협' in client):
+        if raw_dept.startswith('을지로') or ('을지로' in raw_dept and client not in raw_dept):
+            branch = re.search(r'을지로[가-힣]*', raw_dept)
+            b_name = branch.group(0) if branch else '을지로금융센터'
+            if not b_name.endswith('금융센터'):
+                b_name = '을지로금융센터'
+            raw_dept = f"{client} {b_name}"
+    
+    if len(re.findall(r'[가-힣]', raw_dept)) >= 2:
+        result['담당자소속'] = raw_dept
+    elif client:
+        result['담당자소속'] = client
 
-    # 6. 담당자 이름 (작 성 자, 성명, 평가자)
-    m_name = re.search(r'(?:작\s*성\s*자|성\s*명|담\s*당\s*자(?:\s*명)?|평\s*가\s*자)\s*[:：\-]?\s*([^\n\r]+?)(?=[\r\n]|$)', text)
-    if m_name:
-        raw_name = re.sub(r'^[:：\-\s|]+', '', m_name.group(1)).strip()
-        raw_name = re.sub(r'\(.*?\)|[（(].*?[)）]', '', raw_name).strip()
-        raw_name = re.sub(r'[인印서명]+$', '', raw_name).strip()
-        hangul_name = ''.join(re.findall(r'[가-힣a-zA-Z]', raw_name))
-        result['담당자이름'] = hangul_name if hangul_name else raw_name
+    # 6. 담당자 이름 (작 성 자, 성명, 평가자) - 도장 제거된 하단 텍스트 우선 탐색 및 3글자 한국어 성명 추출
+    def extract_name(search_str: str) -> str:
+        m_n = re.search(r'(?:작\s*성\s*자|담\s*당\s*자(?:\s*명)?|성\s*명|평\s*가\s*자)\s*[:：;\-]?\s*([^\n\r]+)', search_str)
+        if m_n:
+            sub = m_n.group(1)
+            sub = re.sub(r'\(.*?\)|[（(].*?[)）]', '', sub)
+            sub = re.sub(r'[인印서명]+$', '', sub)
+            sub = re.split(r'[,!?:;/()（）\[\]<>{}\d\.\-\~|]', sub)[0]
+            m_h = re.search(r'([가-힣](?:\s*[가-힣]){1,2})', sub)
+            if m_h:
+                cand = re.sub(r'\s+', '', m_h.group(1))
+                for skip in ['작성자', '담당자', '성명', '평가자', '소속']:
+                    cand = cand.replace(skip, '')
+                if 2 <= len(cand) <= 4:
+                    return cand
+        return ""
 
-    # 7. 평가 점수 키워드 및 1~5점 산출
+    found_name = extract_name(footer_part)
+    if not found_name or len(found_name) < 3:
+        alt_name = extract_name(main_part)
+        if len(alt_name) >= 3:
+            found_name = alt_name
+        elif not found_name:
+            found_name = alt_name
+    result['담당자이름'] = found_name
+
+    # 7. 평가 점수 키워드 및 1~5점 산출 (개편된 7개 항목)
     score_keywords = {
-        '소통_설명및협의': ['설명', '협의', '설명및협의'],
-        '소통_공사기간준수': ['공사기간올 준수', '기간준수', '공사기간 준수', '공기 준수'],
-        '품질_계약내용실행': ['계약내용', '충실히 실행', '실행'],
-        '품질_설계개선': ['설계서', '설계개선', '개선'],
-        '안전_안전사고예방': ['안전사고', '안전', '의무를 다'],
-        '기타_민원관리': ['민원', '소음', '분진'],
-        '종합_전반적만족도': ['전반적', '전만적', '만족하고 있다']
+        '소통_설명및협의': ['설명', '협의', '설명및협의', '설명과 협의'],
+        '품질_기간준수': ['공사기간', '기간준수', '공기 준수', '기간을 준수', '작업하였다'],
+        '품질_내용준수': ['계약', '계약내용', '내용준수', '충실히 실행', '실행되었다'],
+        '품질_개선': ['설계서', '설계개선', '개선되었다', '개선'],
+        '안전_사고예방': ['안전사고', '사고예방', '안전', '의무를 다'],
+        '기타_민원관리': ['민원', '민원관리', '소음', '분진', '관리를 잘하였다'],
+        '종합_전체만족도': ['전반적', '전체만족도', '전반만족', '만족하고 있다', '시공하는 건설공사']
     }
     for line in lines:
         for score_key, kw_list in score_keywords.items():
@@ -417,8 +571,8 @@ def parse_survey_text(text: str) -> dict:
                         result[score_key] = int(digits[-1])
                     except Exception:
                         pass
-
     return result
+
 
 # -------------------------------------------------------------
 # 4. 좌측 사이드바: 파일 업로드 & 입력 폼
@@ -532,34 +686,34 @@ with st.sidebar:
         st.caption("1점: 매우불만 | 3점: 보통 | 5점: 매우만족")
 
         # 7개 평가 점수 입력 (문서 인식 점수 자동 반영)
-        score_communication_1 = st.radio(
+        score_communication = st.radio(
             "1. [소통] 설명 및 협의",
             options=[1, 2, 3, 4, 5],
             index=max(0, min(4, saved_scores.get("소통_설명및협의", 5) - 1)),
             horizontal=True
         )
-        score_communication_2 = st.radio(
-            "2. [소통] 공사기간 준수",
+        score_quality_period = st.radio(
+            "2. [품질] 기간 준수",
             options=[1, 2, 3, 4, 5],
-            index=max(0, min(4, saved_scores.get("소통_공사기간준수", 5) - 1)),
+            index=max(0, min(4, saved_scores.get("품질_기간준수", 5) - 1)),
             horizontal=True
         )
-        score_quality_1 = st.radio(
-            "3. [품질] 계약내용 실행",
+        score_quality_content = st.radio(
+            "3. [품질] 내용 준수",
             options=[1, 2, 3, 4, 5],
-            index=max(0, min(4, saved_scores.get("품질_계약내용실행", 5) - 1)),
+            index=max(0, min(4, saved_scores.get("품질_내용준수", 5) - 1)),
             horizontal=True
         )
-        score_quality_2 = st.radio(
-            "4. [품질] 설계 개선",
+        score_quality_improve = st.radio(
+            "4. [품질] 개선",
             options=[1, 2, 3, 4, 5],
-            index=max(0, min(4, saved_scores.get("품질_설계개선", 5) - 1)),
+            index=max(0, min(4, saved_scores.get("품질_개선", 5) - 1)),
             horizontal=True
         )
         score_safety = st.radio(
-            "5. [안전] 안전사고 예방",
+            "5. [안전] 사고 예방",
             options=[1, 2, 3, 4, 5],
-            index=max(0, min(4, saved_scores.get("안전_안전사고예방", 5) - 1)),
+            index=max(0, min(4, saved_scores.get("안전_사고예방", 5) - 1)),
             horizontal=True
         )
         score_etc = st.radio(
@@ -569,9 +723,9 @@ with st.sidebar:
             horizontal=True
         )
         score_overall = st.radio(
-            "7. [종합] 전반적 만족도",
+            "7. [종합] 전체 만족도",
             options=[1, 2, 3, 4, 5],
-            index=max(0, min(4, saved_scores.get("종합_전반적만족도", 5) - 1)),
+            index=max(0, min(4, saved_scores.get("종합_전체만족도", 5) - 1)),
             horizontal=True
         )
 
@@ -585,10 +739,10 @@ with st.sidebar:
             else:
                 # 점수 리스트
                 scores = [
-                    score_communication_1,
-                    score_communication_2,
-                    score_quality_1,
-                    score_quality_2,
+                    score_communication,
+                    score_quality_period,
+                    score_quality_content,
+                    score_quality_improve,
                     score_safety,
                     score_etc,
                     score_overall
@@ -607,13 +761,13 @@ with st.sidebar:
                     "계약기간": period,
                     "담당자소속": dept,
                     "담당자이름": manager_name,
-                    "소통_설명및협의": score_communication_1,
-                    "소통_공사기간준수": score_communication_2,
-                    "품질_계약내용실행": score_quality_1,
-                    "품질_설계개선": score_quality_2,
-                    "안전_안전사고예방": score_safety,
+                    "소통_설명및협의": score_communication,
+                    "품질_기간준수": score_quality_period,
+                    "품질_내용준수": score_quality_content,
+                    "품질_개선": score_quality_improve,
+                    "안전_사고예방": score_safety,
                     "기타_민원관리": score_etc,
-                    "종합_전반적만족도": score_overall,
+                    "종합_전체만족도": score_overall,
                     "합계": total_sum,
                     "평균": avg_score
                 }
@@ -675,17 +829,30 @@ with tab1:
     with col_down:
         st.write("") # 줄맞춤 여백
         if total_count > 0:
-            csv_data = df_data.to_csv(index=False, encoding="utf-8-sig")
-            st.download_button(
-                label="📥 엑셀용 CSV 다운로드 (UTF-8-SIG)",
-                data=csv_data,
-                file_name=f"survey_summary_{datetime.datetime.now().strftime('%Y%m%d_%H%M%S')}.csv",
-                mime="text/csv",
-                use_container_width=True,
-                type="primary"
-            )
+            col_d1, col_d2 = st.columns(2)
+            with col_d1:
+                excel_bytes = get_excel_download_bytes(df_data)
+                st.download_button(
+                    label="📥 엑셀 (.xlsx)",
+                    data=excel_bytes,
+                    file_name=f"survey_result_{datetime.datetime.now().strftime('%Y%m%d_%H%M%S')}.xlsx",
+                    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                    use_container_width=True,
+                    type="primary",
+                    help="한글 깨짐 없는 정식 엑셀 파일(.xlsx)로 다운로드합니다."
+                )
+            with col_d2:
+                csv_bytes = df_data.to_csv(index=False).encode("utf-8-sig")
+                st.download_button(
+                    label="📄 CSV (.csv)",
+                    data=csv_bytes,
+                    file_name=f"survey_data_{datetime.datetime.now().strftime('%Y%m%d_%H%M%S')}.csv",
+                    mime="text/csv",
+                    use_container_width=True,
+                    help="UTF-8-SIG BOM이 포함된 CSV 파일로 다운로드합니다."
+                )
         else:
-            st.button("📥 엑셀용 CSV 다운로드", disabled=True, use_container_width=True)
+            st.button("📥 엑셀 다운로드", disabled=True, use_container_width=True)
 
     # 검색 필터 적용
     filtered_df = df_data.copy()
@@ -715,13 +882,13 @@ with tab1:
                 "계약기간": st.column_config.TextColumn("계약기간", width="medium"),
                 "담당자소속": st.column_config.TextColumn("담당자소속", width="small"),
                 "담당자이름": st.column_config.TextColumn("담당자이름", width="small"),
-                "소통_설명및협의": st.column_config.NumberColumn("소통:설명협의", format="%d"),
-                "소통_공사기간준수": st.column_config.NumberColumn("소통:공기준수", format="%d"),
-                "품질_계약내용실행": st.column_config.NumberColumn("품질:계약실행", format="%d"),
-                "품질_설계개선": st.column_config.NumberColumn("품질:설계개선", format="%d"),
-                "안전_안전사고예방": st.column_config.NumberColumn("안전:사고예방", format="%d"),
+                "소통_설명및협의": st.column_config.NumberColumn("소통:설명및협의", format="%d"),
+                "품질_기간준수": st.column_config.NumberColumn("품질:기간준수", format="%d"),
+                "품질_내용준수": st.column_config.NumberColumn("품질:내용준수", format="%d"),
+                "품질_개선": st.column_config.NumberColumn("품질:개선", format="%d"),
+                "안전_사고예방": st.column_config.NumberColumn("안전:사고예방", format="%d"),
                 "기타_민원관리": st.column_config.NumberColumn("기타:민원관리", format="%d"),
-                "종합_전반적만족도": st.column_config.NumberColumn("종합:전반만족", format="%d"),
+                "종합_전체만족도": st.column_config.NumberColumn("종합:전체만족도", format="%d"),
                 "합계": st.column_config.NumberColumn("총점 (35점)", format="%d"),
                 "평균": st.column_config.NumberColumn("평균 (5.0점)", format="%.1f 점"),
             }
@@ -790,15 +957,15 @@ with tab2:
         score_means = numeric_scores.mean().round(2).reset_index()
         score_means.columns = ["평가항목", "평균점수"]
         
-        # 라벨 가독성 개선
+        # 라벨 가독성 개선 (개편된 7개 항목명)
         label_map = {
-            "소통_설명및협의": "1. 소통: 설명 및 협의",
-            "소통_공사기간준수": "2. 소통: 공사기간 준수",
-            "품질_계약내용실행": "3. 품질: 계약내용 실행",
-            "품질_설계개선": "4. 품질: 설계 개선",
-            "안전_안전사고예방": "5. 안전: 안전사고 예방",
-            "기타_민원관리": "6. 기타: 민원 관리",
-            "종합_전반적만족도": "7. 종합: 전반적 만족도"
+            "소통_설명및협의": "1. 소통: 설명및협의",
+            "품질_기간준수": "2. 품질: 기간준수",
+            "품질_내용준수": "3. 품질: 내용준수",
+            "품질_개선": "4. 품질: 개선",
+            "안전_사고예방": "5. 안전: 사고예방",
+            "기타_민원관리": "6. 기타: 민원관리",
+            "종합_전체만족도": "7. 종합: 전체만족도"
         }
         score_means["문항명"] = score_means["평가항목"].map(label_map)
         
@@ -811,6 +978,7 @@ with tab2:
         
         # 세부 수치 표
         st.table(score_means[["문항명", "평균점수"]].rename(columns={"문항명": "평가 항목", "평균점수": "평균 점수 (5점 만점)"}))
+
     else:
         st.info("데이터가 등록되면 항목별 평균 점수 차트가 여기에 표시됩니다.")
 
@@ -820,6 +988,6 @@ with tab2:
 with st.expander("ℹ️ 사용 안내 및 데이터 백업 팁"):
     st.markdown("""
     - **데이터 자동 저장**: 설문 등록 시 `d:\\servey-app\\survey_data.csv` 파일에 자동으로 계속 누적 저장됩니다.
-    - **엑셀 호환(한글 보존)**: 다운로드 버튼을 누르면 엑셀에서 바로 열어도 한글이 깨지지 않는 `UTF-8-SIG` 포맷으로 다운로드됩니다.
+    - **엑셀 호환(한글 보존)**: 📥 **엑셀 (.xlsx)** 버튼을 누르면 서식과 열 너비가 자동 최적화된 정식 엑셀 파일로 바로 열리며 한글 깨짐이 전혀 없습니다. (기존 CSV 포맷도 UTF-8 BOM 바이트로 안전하게 다운로드 가능합니다.)
     - **지류 설문지 확인**: 좌측 사이드바의 파일 업로더에 PDF나 스캔 이미지를 올리면 바로 보면서 오타 없이 편리하게 입력할 수 있습니다.
     """)
