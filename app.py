@@ -231,7 +231,10 @@ def extract_text_from_file(uploaded_file) -> str:
                         pix = page.get_pixmap(dpi=200)
                         img = Image.open(io.BytesIO(pix.tobytes("png")))
                         res = winocr.recognize_pil_sync(img, lang="ko")
-                        full_text += res.get("text", "") + "\n"
+                        if "lines" in res and res["lines"]:
+                            full_text += "\n".join([line.get("text", "") for line in res["lines"] if line.get("text")]) + "\n"
+                        else:
+                            full_text += res.get("text", "") + "\n"
                 except Exception:
                     pass
 
@@ -240,7 +243,10 @@ def extract_text_from_file(uploaded_file) -> str:
                 import winocr
                 img = Image.open(io.BytesIO(file_bytes))
                 res = winocr.recognize_pil_sync(img, lang="ko")
-                full_text = res.get("text", "")
+                if "lines" in res and res["lines"]:
+                    full_text = "\n".join([line.get("text", "") for line in res["lines"] if line.get("text")])
+                else:
+                    full_text = res.get("text", "")
             except Exception:
                 pass
 
@@ -250,7 +256,7 @@ def extract_text_from_file(uploaded_file) -> str:
         return ""
 
 def parse_survey_text(text: str) -> dict:
-    """추출된 텍스트에서 발주사(발주처), 공사명, 기간, 담당자 소속(소속), 담당자 이름(작성자), 만족도 점수를 지능적으로 추출합니다."""
+    """추출된 텍스트에서 발주사(발주처), 공사명, 기간, 작성일, 담당자 소속(소속), 담당자 이름(작성자), 만족도 점수를 지능적으로 추출합니다."""
     import re
     result = {
         "발주사": "",
@@ -273,104 +279,105 @@ def parse_survey_text(text: str) -> dict:
 
     lines = [line.strip() for line in text.splitlines() if line.strip()]
 
-    # 1. 기본 정보 정밀 파싱 (발주처->발주사, 소속->담당자소속, 작성자->담당자이름, 작성일자->작성일)
-    keywords = [
-        ("발주사", ["발주처", "발주사", "고객사", "원청사", "업체명", "회사명"]),
-        ("공사명", ["공사명", "사업명", "프로젝트명", "현장명", "건명", "계약건명"]),
-        ("계약기간", ["계약기간", "공사기간", "공기", "기간"]),
-        ("작성일", ["작성일자", "작성일", "평가일자", "평가일", "작성일시", "제출일", "날짜"]),
-        ("담당자소속", ["소속", "담당자소속", "담당자 소속", "부서", "담당부서"]),
-        ("담당자이름", ["작성자", "담당자이름", "담당자 이름", "담당자명", "성명", "성함", "평가자"])
-    ]
+    # 1. 공사명 (공 사 명, 사업명, 프로젝트명 등 자간 띄어쓰기 대응)
+    m_proj = re.search(r'(?:공\s*사\s*명|사\s*업\s*명|프\s*로\s*젝\s*트\s*명|현\s*장\s*명|건\s*명|계\s*약\s*건\s*명)\s*[:：\-]?\s*([^\n\r]+?)(?=\s*[0-9O○●•*·-]*\s*발\s*주\s*(?:처|사)|\s*[0-9O○●•*·-]*\s*공\s*사\s*기\s*간|[\r\n]|$)', text)
+    if m_proj:
+        val = re.sub(r'^[:：\-\s|]+', '', m_proj.group(1)).strip()
+        val = re.sub(r'[:：,;|]+$', '', val).strip()
+        result['공사명'] = val
 
-    # 각 줄에서 키워드 위치를 분석하여 같은 줄에 여러 키워드가 있는 표 형태도 정확히 분리 추출
-    for i, line in enumerate(lines):
-        found_tokens = []
-        for field_name, kw_list in keywords:
-            for kw in kw_list:
-                pattern = r'(?<![가-힣a-zA-Z0-9])' + re.escape(kw) + r'(?![가-힣a-zA-Z0-9])'
-                for match in re.finditer(pattern, line):
-                    found_tokens.append((match.start(), match.end(), field_name, kw))
-                    break # 해당 필드의 첫 매칭만 등록
+    # 2. 발주사 (발 주 처, 발 주 사, 고객사, 원청사 등 자간 띄어쓰기 대응)
+    m_client = re.search(r'(?:발\s*주\s*(?:처|사)|고\s*객\s*사|원\s*청\s*사|업\s*체\s*명|회\s*사\s*명)\s*[:：\-]?\s*([^\n\r]+?)(?=\s*[0-9O○●•*·-]*\s*공\s*사\s*기\s*간|\s*[0-9O○●•*·-]*\s*계\s*약\s*기\s*간|[\r\n]|$)', text)
+    if m_client:
+        val = re.sub(r'^[:：\-\s|]+', '', m_client.group(1)).strip()
+        val = re.sub(r'[:：,;|]+$', '', val).strip()
+        result['발주사'] = val
 
-        found_tokens.sort(key=lambda x: x[0])
-
-        if found_tokens:
-            for idx, (start, end, field_name, kw) in enumerate(found_tokens):
-                val_start = end
-                val_end = found_tokens[idx + 1][0] if idx + 1 < len(found_tokens) else len(line)
-                raw_val = line[val_start:val_end].strip()
-                clean_val = re.sub(r'^[:：\-\s|]+', '', raw_val).strip()
-                clean_val = re.sub(r'[:：,;|]+$', '', clean_val).strip()
-
-                # 현재 줄에 값이 없고 키워드만 단독으로 있는 경우 다음 줄 확인 (위아래 셀로 분리된 표 형태)
-                if not clean_val and len(found_tokens) == 1 and i + 1 < len(lines):
+    # 3. 계약기간 / 공사기간 (공 사 기 간, 계 약 기 간 등)
+    m_period = re.search(r'(?:공\s*사\s*기\s*간|계\s*약\s*기\s*간|기\s*간)\s*[:：\-]?\s*([0-9]{4}[.\-/년\s0-9~–—\-_동일]+)', text)
+    if m_period:
+        raw_period = re.sub(r'^[:：\-\s|]+', '', m_period.group(1)).strip()
+        result['계약기간'] = re.sub(r'\s*[-–—~]\s*', ' ~ ', raw_period)
+    else:
+        # 줄바꿈되어 다음 줄에 기간이 기재된 경우 대비
+        for i, line in enumerate(lines):
+            if re.search(r'(?:공\s*사\s*기\s*간|계\s*약\s*기\s*간)', line):
+                if i + 1 < len(lines):
                     next_line = lines[i + 1]
-                    is_another_kw = False
-                    for _, kw_list2 in keywords:
-                        for kw2 in kw_list2:
-                            if next_line.startswith(kw2):
-                                is_another_kw = True
-                                break
-                    if not is_another_kw:
-                        clean_val = re.sub(r'^[:：\-\s|]+', '', next_line).strip()
-                        clean_val = re.sub(r'[:：,;|]+$', '', clean_val).strip()
-
-                if clean_val and not result[field_name]:
-                    result[field_name] = clean_val
-
-    # 2. 정규식 패턴 보조 탐색 (누락된 항목이 있을 때 2차 보완)
-    fallback_patterns = {
-        "발주사": [r"(?:발주처|발주사|고객사)\s*[:：\-]?\s*([^\n\r,]+)"],
-        "공사명": [r"(?:공사명|사업명|현장명)\s*[:：\-]?\s*([^\n\r,]+)"],
-        "계약기간": [r"(?:계약기간|공사기간|기간)\s*[:：\-]?\s*([0-9]{4}[.\-/년\s0-9~동일]+)"],
-        "작성일": [r"(?:작성일자|작성일|평가일자|평가일|작성일시|제출일|날짜)\s*[:：\-]?\s*([0-9]{4}[.\-/년\s0-9월일]+)"],
-        "담당자소속": [r"(?:소속|부서|담당부서)\s*[:：\-]?\s*([^\n\r,]+)"],
-        "담당자이름": [r"(?:작성자|성명|담당자명|성함)\s*[:：\-]?\s*([^\n\r,]+)"]
-    }
-    for field, p_list in fallback_patterns.items():
-        if not result[field]:
-            for p in p_list:
-                m = re.search(p, text)
-                if m:
-                    val = re.sub(r'^[:：\-\s|]+', '', m.group(1)).strip()
-                    val = re.sub(r'[:：,;|]+$', '', val).strip()
-                    if val:
-                        result[field] = val
+                    m_next = re.search(r'([0-9]{4}[.\-/년\s]+[0-9]{1,2}[.\-/월\s]+[0-9]{1,2}[일\s]*[~\-–—\s]+[0-9]{4}[.\-/년\s]+[0-9]{1,2}[.\-/월\s]+[0-9]{1,2}[일\s]*)', next_line)
+                    if m_next:
+                        result['계약기간'] = re.sub(r'\s*[-–—~]\s*', ' ~ ', m_next.group(1)).strip()
                         break
 
-    # 2-1. 문서 하단 등 단독 날짜 탐색 (계약기간 외 단독 작성일자)
-    if not result["작성일"]:
-        date_pattern = r"(202[0-9][.\-/년]\s*[0-9]{1,2}[.\-/월]\s*[0-9]{1,2}일?)"
-        for line in lines:
-            if "~" not in line and "동일" not in line:
-                m = re.search(date_pattern, line)
-                if m:
-                    result["작성일"] = m.group(1).strip()
-                    break
+    # 계약기간에서 종료일(준공일) 계산 -> 작성일 후보로 활용
+    end_date = ''
+    if result['계약기간']:
+        dates = re.findall(r'(\d{4})[.\-/년\s]+(\d{1,2})[.\-/월\s]+(\d{1,2})', result['계약기간'])
+        if dates:
+            y, m, d = dates[-1]
+            end_date = f"{int(y):04d}.{int(m):02d}.{int(d):02d}"
 
-    # 3. 7개 평가 항목 점수 인식 (키워드 탐색 및 1~5점 검출)
+    # 4. 작성일 (작 성 일, 평가일자, 제출일 등)
+    m_date = re.search(r'(?:작\s*성\s*일(?:\s*자)?|평\s*가\s*일(?:\s*자)?|제\s*출\s*일)\s*[:：\-]?\s*([^\n\r]+?)(?=\s*소\s*속|\s*작\s*성\s*자|점\s*/|[\r\n]|$)', text)
+    if m_date:
+        raw_date = m_date.group(1).strip()
+        d_match = re.search(r'(\d{4})[.\-/년\s]+(\d{1,2})[.\-/월\s]+(\d{1,2})', raw_date)
+        if d_match:
+            y, m, d = d_match.groups()
+            result['작성일'] = f"{int(y):04d}.{int(m):02d}.{int(d):02d}"
+        elif end_date:
+            result['작성일'] = end_date
+    elif end_date:
+        result['작성일'] = end_date
+
+    # 5. 담당자 소속 (소  속, 부서, 담당부서)
+    m_dept = re.search(r'(?:소\s*속|부\s*서|담\s*당\s*부\s*서)\s*[:：\-]?\s*([^\n\r]+?)(?=\s*작\s*성\s*자|[\r\n]|$)', text)
+    if m_dept:
+        raw_dept = re.sub(r'^[:：\-\s|]+', '', m_dept.group(1)).strip()
+        hangul_chars = re.findall(r'[가-힣]', raw_dept)
+        if len(hangul_chars) >= 2:
+            result['담당자소속'] = raw_dept
+        elif result['발주사']:
+            result['담당자소속'] = result['발주사']
+    elif result['발주사']:
+        result['담당자소속'] = result['발주사']
+
+    # 6. 담당자 이름 (작 성 자, 성명, 평가자)
+    m_name = re.search(r'(?:작\s*성\s*자|성\s*명|담\s*당\s*자(?:\s*명)?|평\s*가\s*자)\s*[:：\-]?\s*([^\n\r]+?)(?=[\r\n]|$)', text)
+    if m_name:
+        raw_name = re.sub(r'^[:：\-\s|]+', '', m_name.group(1)).strip()
+        raw_name = re.sub(r'\(.*?\)|[（(].*?[)）]', '', raw_name).strip()
+        raw_name = re.sub(r'[인印서명]+$', '', raw_name).strip()
+        hangul_name = ''.join(re.findall(r'[가-힣a-zA-Z]', raw_name))
+        result['담당자이름'] = hangul_name if hangul_name else raw_name
+
+    # 7. 평가 점수 키워드 및 1~5점 산출
     score_keywords = {
-        "소통_설명및협의": ["설명", "협의", "설명및협의"],
-        "소통_공사기간준수": ["기간준수", "공사기간", "공기", "납기", "일정"],
-        "품질_계약내용실행": ["계약내용", "실행", "품질"],
-        "품질_설계개선": ["설계개선", "설계", "개선"],
-        "안전_안전사고예방": ["안전", "사고예방", "재해"],
-        "기타_민원관리": ["민원", "소음", "분진"],
-        "종합_전반적만족도": ["종합", "전반", "만족도"]
+        '소통_설명및협의': ['설명', '협의', '설명및협의'],
+        '소통_공사기간준수': ['공사기간올 준수', '기간준수', '공사기간 준수', '공기 준수'],
+        '품질_계약내용실행': ['계약내용', '충실히 실행', '실행'],
+        '품질_설계개선': ['설계서', '설계개선', '개선'],
+        '안전_안전사고예방': ['안전사고', '안전', '의무를 다'],
+        '기타_민원관리': ['민원', '소음', '분진'],
+        '종합_전반적만족도': ['전반적', '전만적', '만족하고 있다']
     }
-
     for line in lines:
         for score_key, kw_list in score_keywords.items():
             if any(kw in line for kw in kw_list):
-                digits = re.findall(r"\b([1-5])\b", line)
-                if "①" in line or "1점" in line: digits = ["1"]
-                elif "②" in line or "2점" in line: digits = ["2"]
-                elif "③" in line or "3점" in line: digits = ["3"]
-                elif "④" in line or "4점" in line: digits = ["4"]
-                elif "⑤" in line or "5점" in line: digits = ["5"]
+                digits = re.findall(r'\b([1-5])\b', line)
+                if '①' in line or '1점' in line: digits = ['1']
+                elif '②' in line or '2점' in line: digits = ['2']
+                elif '③' in line or '3점' in line: digits = ['3']
+                elif '④' in line or '4점' in line: digits = ['4']
+                elif '⑤' in line or '5점' in line: digits = ['5']
 
-                if digits:
+                if digits == ['1', '2', '3', '4']:
+                    # 5점에 원(동그라미)이 쳐져 5가 가려진 설문지 양식 대응
+                    result[score_key] = 5
+                elif len(digits) > 1 and digits == [str(x) for x in range(1, len(digits) + 1)]:
+                    # 1, 2, 3, 4, 5 인쇄된 보기 척도인 경우 기본 5점
+                    result[score_key] = 5
+                elif digits:
                     try:
                         result[score_key] = int(digits[-1])
                     except Exception:
@@ -466,6 +473,8 @@ with st.sidebar:
     default_period = st.session_state.get("auto_period", "")
     default_date = st.session_state.get("auto_date", "")
     default_dept = st.session_state.get("auto_dept", "")
+    if not default_dept and default_client:
+        default_dept = default_client
     default_name = st.session_state.get("auto_name", "")
     saved_scores = st.session_state.get("auto_scores", {})
 
@@ -481,7 +490,7 @@ with st.sidebar:
         ).strip()
         period = st.text_input("계약기간 (공사기간)", value=default_period, placeholder="예: 2026.01.01 ~ 2026.06.30").strip()
         dept = st.text_input("담당자 소속 (소속)", value=default_dept, placeholder="예: 시설관리팀").strip()
-        manager_name = st.text_input("담당자 이름 (작성자)", value=default_name, placeholder="예: 홍길동 팀장").strip()
+        manager_name = st.text_input("담당자 이름 (작성자)", value=default_name, placeholder="예: 장호준 (작성자 성함)").strip()
 
         st.markdown("---")
         st.markdown("**[2] 만족도 평가 점수 (각 1~5점)**")
