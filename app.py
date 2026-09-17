@@ -577,9 +577,10 @@ total_count = len(df_data)
 col1, col2, col3, col4 = st.columns(4)
 
 if total_count > 0:
-    overall_mean = round(float(df_data["평균"].mean()), 1)
-    highest_score = round(float(df_data["평균"].max()), 1)
-    latest_date = str(df_data["등록일시"].iloc[-1])[:10]
+    mean_series = pd.to_numeric(df_data["평균"], errors="coerce").dropna()
+    overall_mean = round(float(mean_series.mean()), 1) if not mean_series.empty else 0.0
+    highest_score = round(float(mean_series.max()), 1) if not mean_series.empty else 0.0
+    latest_date = str(df_data["등록일시"].iloc[-1])[:10] if "등록일시" in df_data.columns and len(df_data) > 0 else "-"
 else:
     overall_mean = 0.0
     highest_score = 0.0
@@ -713,8 +714,9 @@ with tab1:
 with tab2:
     if total_count > 0:
         st.subheader("📊 7개 평가 항목별 평균 점수 현황")
-        # 항목별 평균 점수 계산
-        score_means = df_data[SCORE_COLUMNS].mean().round(2).reset_index()
+        # 항목별 평균 점수 계산 (문자열 등이 섞여도 안전하게 수치 변환)
+        numeric_scores = df_data[SCORE_COLUMNS].apply(pd.to_numeric, errors="coerce")
+        score_means = numeric_scores.mean().round(2).reset_index()
         score_means.columns = ["평가항목", "평균점수"]
         
         # 라벨 가독성 개선
