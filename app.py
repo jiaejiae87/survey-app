@@ -1,6 +1,7 @@
 import os
 import io
 import re
+import base64
 import sqlite3
 import datetime
 import pandas as pd
@@ -11,7 +12,7 @@ from PIL import Image
 # 1. 페이지 기본 설정 및 스타일
 # -------------------------------------------------------------
 st.set_page_config(
-    page_title="(주)수협개발 건설공사 만족도 조사 집계",
+    page_title="(주)수협개발 자료취합 시스템",
     page_icon="🏢",
     layout="wide",
     initial_sidebar_state="expanded"
@@ -50,7 +51,19 @@ BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 DB_FILE = os.path.join(BASE_DIR, "survey.db")
 CSV_FILE = os.path.join(BASE_DIR, "survey_data.csv")
 UPLOAD_DIR = os.path.join(BASE_DIR, "static", "uploads")
+EMBLEM_FILE = os.path.join(BASE_DIR, "static", "sh_emblem.png")
+LOGO_FILE = os.path.join(BASE_DIR, "static", "logo.png")
 os.makedirs(UPLOAD_DIR, exist_ok=True)
+
+def get_image_base64(filepath: str) -> str:
+    """이미지 파일을 base64 인코딩 문자열로 반환하여 HTML에 안정적으로 렌더링합니다."""
+    if os.path.exists(filepath):
+        try:
+            with open(filepath, "rb") as f_img:
+                return base64.b64encode(f_img.read()).decode("utf-8")
+        except Exception:
+            return ""
+    return ""
 
 SCORE_COLUMNS = [
     "소통_설명및협의",
@@ -734,9 +747,17 @@ def parse_survey_text(text: str) -> dict:
 # 3.1. (주)수협개발 보안 인증 게이트 페이지
 # -------------------------------------------------------------
 if not st.session_state.get("authenticated", False):
-    st.markdown("""
+    emblem_b64 = get_image_base64(EMBLEM_FILE)
+    logo_part = (
+        f'<div style="display:flex; align-items:center; justify-content:center; gap:12px; margin-bottom:14px;">'
+        f'<img src="data:image/png;base64,{emblem_b64}" style="height:48px; object-fit:contain;" alt="수협 로고" />'
+        f'<span style="font-family:\'Pretendard\', \'Malgun Gothic\', \'Apple SD Gothic Neo\', sans-serif; font-weight:800; font-size:1.85rem; color:#111827; letter-spacing:-0.5px;">(주) 수협개발</span>'
+        f'</div>'
+    ) if emblem_b64 else '<div style="font-family:\'Pretendard\', \'Malgun Gothic\', sans-serif; font-weight:800; font-size:1.85rem; color:#111827; margin-bottom:14px;">(주) 수협개발</div>'
+
+    st.markdown(f"""
     <style>
-        .gate-container {
+        .gate-container {{
             max-width: 520px;
             margin: 60px auto 30px auto;
             padding: 35px 30px;
@@ -745,24 +766,24 @@ if not st.session_state.get("authenticated", False):
             box-shadow: 0 10px 25px -5px rgba(0, 0, 0, 0.08), 0 8px 10px -6px rgba(0, 0, 0, 0.06);
             border-top: 6px solid #1E3A8A;
             text-align: center;
-        }
-        .gate-title {
-            font-size: 1.5rem;
+        }}
+        .gate-title {{
+            font-size: 1.55rem;
             font-weight: 700;
             color: #1E3A8A;
-            margin-top: 12px;
+            margin-top: 10px;
             margin-bottom: 8px;
             line-height: 1.4;
-        }
-        .gate-desc {
+        }}
+        .gate-desc {{
             font-size: 0.95rem;
             color: #475569;
             margin-bottom: 10px;
-        }
+        }}
     </style>
     <div class="gate-container">
-        <div style="font-size: 3rem;">🏢</div>
-        <div class="gate-title">(주)수협개발 건설공사 만족도 조사 집계사이트</div>
+        {logo_part}
+        <div class="gate-title">(주)수협개발 자료취합 시스템</div>
         <div class="gate-desc">보안을 위해 <b>인증번호 입력 후 접속 가능합니다.</b></div>
     </div>
     """, unsafe_allow_html=True)
@@ -793,6 +814,21 @@ if not st.session_state.get("authenticated", False):
 # 4. 좌측 사이드바: 파일 업로드 & 입력 폼
 # -------------------------------------------------------------
 with st.sidebar:
+    sb_emblem_b64 = get_image_base64(EMBLEM_FILE)
+    if sb_emblem_b64:
+        st.markdown(f'''
+        <div style="display:flex; align-items:center; gap:10px; padding:4px 0 12px 0; border-bottom:1px solid #E2E8F0; margin-bottom:12px;">
+            <img src="data:image/png;base64,{sb_emblem_b64}" style="height:32px; object-fit:contain;" alt="수협 로고" />
+            <span style="font-family:\'Pretendard\', \'Malgun Gothic\', sans-serif; font-weight:800; font-size:1.15rem; color:#111827;">(주) 수협개발</span>
+        </div>
+        ''', unsafe_allow_html=True)
+    else:
+        st.markdown('''
+        <div style="padding:4px 0 12px 0; border-bottom:1px solid #E2E8F0; margin-bottom:12px;">
+            <span style="font-family:\'Pretendard\', \'Malgun Gothic\', sans-serif; font-weight:800; font-size:1.15rem; color:#111827;">(주) 수협개발</span>
+        </div>
+        ''', unsafe_allow_html=True)
+
     col_auth_l, col_auth_r = st.columns([2.5, 1.5])
     with col_auth_l:
         st.markdown("<span style='color:#166534; font-weight:600; font-size:0.85rem;'>🟢 (주)수협개발 인증 완료</span>", unsafe_allow_html=True)
@@ -1035,8 +1071,26 @@ with st.sidebar:
 # -------------------------------------------------------------
 # 5. 메인 화면: 실시간 누적 집계표 및 요약 통계
 # -------------------------------------------------------------
-st.markdown('<div class="main-title">📊 (주)수협개발 건설공사 만족도 조사 집계</div>', unsafe_allow_html=True)
-st.markdown('<div class="sub-title">(주)수협개발 건설공사 설문지를 등록하고 실시간 누적 결과 및 요약 통계를 모니터링합니다.</div>', unsafe_allow_html=True)
+main_emblem_b64 = get_image_base64(EMBLEM_FILE)
+if main_emblem_b64:
+    header_html = f'''
+    <div style="display:flex; align-items:center; gap:14px; margin-bottom:8px;">
+        <img src="data:image/png;base64,{main_emblem_b64}" style="height:44px; object-fit:contain;" alt="수협 로고" />
+        <div>
+            <div style="font-family:'Pretendard', 'Malgun Gothic', 'Apple SD Gothic Neo', sans-serif; font-weight:800; font-size:1.15rem; color:#111827; line-height:1.2;">(주) 수협개발</div>
+            <div class="main-title" style="margin:0; font-size:1.85rem; line-height:1.3;">📊 (주)수협개발 자료취합 시스템</div>
+        </div>
+    </div>
+    '''
+else:
+    header_html = '''
+    <div>
+        <div style="font-family:'Pretendard', 'Malgun Gothic', 'Apple SD Gothic Neo', sans-serif; font-weight:800; font-size:1.15rem; color:#111827; line-height:1.2;">(주) 수협개발</div>
+        <div class="main-title" style="margin:0; font-size:1.85rem; line-height:1.3;">📊 (주)수협개발 자료취합 시스템</div>
+    </div>
+    '''
+st.markdown(header_html, unsafe_allow_html=True)
+st.markdown('<div class="sub-title">(주)수협개발 설문지 및 주요 자료를 취합하고 실시간 누적 결과 및 요약 통계를 모니터링합니다.</div>', unsafe_allow_html=True)
 
 # 최신 데이터 불러오기
 df_data = load_survey_data()
