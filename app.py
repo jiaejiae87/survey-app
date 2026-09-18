@@ -2,6 +2,7 @@ import os
 import io
 import re
 import base64
+import unicodedata
 import sqlite3
 import datetime
 import pandas as pd
@@ -18,7 +19,7 @@ st.set_page_config(
     initial_sidebar_state="expanded"
 )
 
-# 커스텀 CSS (카드 스타일, 깔끔한 UI)
+# 커스텀 CSS (카드 스타일, 깔끔한 UI, 드래그앤드롭 최적화)
 st.markdown("""
 <style>
     .main-title {
@@ -44,6 +45,22 @@ st.markdown("""
         font-weight: 600;
         color: #2563EB;
     }
+    /* 파일 업로더 브라우즈 버튼 숨김 (끌어다 넣기 전용으로 전환하여 폴더 탐색기 지연 방지) */
+    [data-testid="stFileUploaderDropzone"] button {
+        display: none !important;
+    }
+    [data-testid="stFileUploaderDropzone"] {
+        border: 2px dashed #3B82F6 !important;
+        background-color: #F8FAFC !important;
+        border-radius: 10px !important;
+        padding: 18px 12px !important;
+        text-align: center !important;
+        cursor: copy !important;
+    }
+    [data-testid="stFileUploaderDropzone"]:hover {
+        background-color: #EFF6FF !important;
+        border-color: #1D4ED8 !important;
+    }
 </style>
 """, unsafe_allow_html=True)
 
@@ -64,6 +81,32 @@ def get_image_base64(filepath: str) -> str:
         except Exception:
             return ""
     return ""
+
+def find_upload_file(filename: str):
+    """OS 파일 시스템 및 인코딩 차이(NFC/NFD)를 고려하여 실제 보관된 첨부파일 경로를 반환합니다."""
+    if not filename or pd.isna(filename):
+        return None
+    fn = str(filename).strip()
+    if not fn:
+        return None
+    p1 = os.path.join(UPLOAD_DIR, fn)
+    if os.path.exists(p1):
+        return p1
+    fn_nfc = unicodedata.normalize('NFC', fn)
+    p2 = os.path.join(UPLOAD_DIR, fn_nfc)
+    if os.path.exists(p2):
+        return p2
+    fn_nfd = unicodedata.normalize('NFD', fn)
+    p3 = os.path.join(UPLOAD_DIR, fn_nfd)
+    if os.path.exists(p3):
+        return p3
+    try:
+        for item in os.listdir(UPLOAD_DIR):
+            if unicodedata.normalize('NFC', item) == fn_nfc or item.lower() == fn.lower():
+                return os.path.join(UPLOAD_DIR, item)
+    except Exception:
+        pass
+    return None
 
 SCORE_COLUMNS = [
     "소통_설명및협의",
@@ -747,42 +790,33 @@ def parse_survey_text(text: str) -> dict:
 # 3.1. (주)수협개발 보안 인증 게이트 페이지
 # -------------------------------------------------------------
 if not st.session_state.get("authenticated", False):
-    emblem_b64 = get_image_base64(EMBLEM_FILE)
-    logo_part = (
-        f'<div style="display:flex; align-items:center; justify-content:center; gap:12px; margin-bottom:14px;">'
-        f'<img src="data:image/png;base64,{emblem_b64}" style="height:48px; object-fit:contain;" alt="수협 로고" />'
-        f'<span style="font-family:\'Pretendard\', \'Malgun Gothic\', \'Apple SD Gothic Neo\', sans-serif; font-weight:800; font-size:1.85rem; color:#111827; letter-spacing:-0.5px;">(주) 수협개발</span>'
-        f'</div>'
-    ) if emblem_b64 else '<div style="font-family:\'Pretendard\', \'Malgun Gothic\', sans-serif; font-weight:800; font-size:1.85rem; color:#111827; margin-bottom:14px;">(주) 수협개발</div>'
-
-    st.markdown(f"""
+    st.markdown("""
     <style>
-        .gate-container {{
+        .gate-container {
             max-width: 520px;
-            margin: 60px auto 30px auto;
+            margin: 60px auto 25px auto;
             padding: 35px 30px;
             background: #FFFFFF;
             border-radius: 16px;
             box-shadow: 0 10px 25px -5px rgba(0, 0, 0, 0.08), 0 8px 10px -6px rgba(0, 0, 0, 0.06);
             border-top: 6px solid #1E3A8A;
             text-align: center;
-        }}
-        .gate-title {{
-            font-size: 1.55rem;
+        }
+        .gate-title {
+            font-size: 1.6rem;
             font-weight: 700;
             color: #1E3A8A;
-            margin-top: 10px;
+            margin-top: 6px;
             margin-bottom: 8px;
             line-height: 1.4;
-        }}
-        .gate-desc {{
+        }
+        .gate-desc {
             font-size: 0.95rem;
             color: #475569;
             margin-bottom: 10px;
-        }}
+        }
     </style>
     <div class="gate-container">
-        {logo_part}
         <div class="gate-title">(주)수협개발 자료취합 시스템</div>
         <div class="gate-desc">보안을 위해 <b>인증번호 입력 후 접속 가능합니다.</b></div>
     </div>
@@ -800,12 +834,35 @@ if not st.session_state.get("authenticated", False):
             btn_gate_submit = st.form_submit_button("접속하기", type="primary", use_container_width=True)
 
             if btn_gate_submit:
-                if auth_password == "수협개발":
+                if auth_password.strip() == "suhyup1995":
                     st.session_state["authenticated"] = True
                     st.rerun()
                 else:
                     st.error("⚠️ 인증번호가 일치하지 않습니다.")
                     st.caption("인증번호 문의는 (주)수협개발 관리자에게 확인해 주시기 바랍니다.")
+
+    # 메인 게이트 하단 공식 CI 브랜딩 푸터
+    emblem_b64 = get_image_base64(EMBLEM_FILE)
+    ci_footer_html = f'''
+    <div style="margin-top: 55px; text-align: center; padding-bottom: 30px;">
+        <div style="display: inline-flex; align-items: center; justify-content: center; gap: 10px; margin-bottom: 6px;">
+            <img src="data:image/png;base64,{emblem_b64}" style="height: 32px; object-fit: contain;" alt="수협개발 CI" />
+            <span style="font-family: 'Pretendard', 'Malgun Gothic', 'Apple SD Gothic Neo', sans-serif; font-weight: 800; font-size: 1.25rem; color: #1E293B; letter-spacing: -0.5px;">(주) 수협개발</span>
+        </div>
+        <div style="font-size: 0.82rem; color: #94A3B8; font-weight: 500;">
+            SH DEVELOP CO., LTD. &nbsp;|&nbsp; 자료취합 시스템
+        </div>
+        <div style="font-size: 0.74rem; color: #CBD5E1; margin-top: 4px;">
+            Copyright © (주)수협개발 All Rights Reserved.
+        </div>
+    </div>
+    ''' if emblem_b64 else '''
+    <div style="margin-top: 55px; text-align: center; padding-bottom: 30px;">
+        <div style="font-family: 'Pretendard', 'Malgun Gothic', sans-serif; font-weight: 800; font-size: 1.25rem; color: #1E293B; margin-bottom: 6px;">(주) 수협개발</div>
+        <div style="font-size: 0.82rem; color: #94A3B8; font-weight: 500;">SH DEVELOP CO., LTD.</div>
+    </div>
+    '''
+    st.markdown(ci_footer_html, unsafe_allow_html=True)
 
     st.stop()
 
@@ -840,11 +897,20 @@ with st.sidebar:
     st.header("📝 설문지 입력 & 파일 확인")
     st.caption("지류 설문지 스캔본/사진을 올리고 바로 입력하세요.")
 
-    # 1) 파일 업로더
+    # 1) 파일 업로더 안내 및 드래그앤드롭 전용 입력창
+    st.markdown("""
+    <div style="background-color: #EFF6FF; border: 1.5px dashed #3B82F6; border-radius: 10px; padding: 12px 10px; text-align: center; margin-bottom: 8px;">
+        <div style="font-size: 1.5rem; margin-bottom: 2px;">📂 ➔ 📥</div>
+        <div style="font-weight: 700; color: #1D4ED8; font-size: 0.92rem; margin-bottom: 2px;">파일을 마우스로 끌어다 넣으세요</div>
+        <div style="font-size: 0.78rem; color: #4B5563; line-height: 1.35;">PC 폴더/바탕화면의 설문지 스캔본을<br/>마우스로 끌어서 아래 네모 칸에 놓으세요.</div>
+        <div style="font-size: 0.72rem; color: #6B7280; margin-top: 4px;">(PNG, JPG, PDF 지원 • 자동 인식)</div>
+    </div>
+    """, unsafe_allow_html=True)
+
     uploaded_file = st.file_uploader(
-        "지류 설문지 첨부 (PNG, JPG, PDF)",
+        "👇 아래 네모 칸으로 파일을 끌어다 놓으세요 (Drag & Drop)",
         type=["png", "jpg", "jpeg", "pdf"],
-        help="업로드한 설문지 문서를 바로 아래에서 확인하면서 점수를 입력할 수 있습니다."
+        help="PC에서 설문지 파일을 마우스로 끌어서 점선 상자 안에 놓으시면 바로 첨부되고 자동 인식됩니다."
     )
 
     # 2) 파일 미리보기 (PDF 또는 이미지)
@@ -1074,23 +1140,17 @@ with st.sidebar:
 main_emblem_b64 = get_image_base64(EMBLEM_FILE)
 if main_emblem_b64:
     header_html = f'''
-    <div style="display:flex; align-items:center; gap:14px; margin-bottom:8px;">
-        <img src="data:image/png;base64,{main_emblem_b64}" style="height:44px; object-fit:contain;" alt="수협 로고" />
-        <div>
-            <div style="font-family:'Pretendard', 'Malgun Gothic', 'Apple SD Gothic Neo', sans-serif; font-weight:800; font-size:1.15rem; color:#111827; line-height:1.2;">(주) 수협개발</div>
-            <div class="main-title" style="margin:0; font-size:1.85rem; line-height:1.3;">📊 (주)수협개발 자료취합 시스템</div>
-        </div>
+    <div style="display:flex; align-items:center; gap:12px; margin-bottom:6px;">
+        <img src="data:image/png;base64,{main_emblem_b64}" style="height:36px; object-fit:contain;" alt="수협 로고" />
+        <span class="main-title" style="margin:0; font-size:1.85rem; font-weight:800; color:#1E3A8A; letter-spacing:-0.5px;">(주)수협개발 자료취합 시스템</span>
     </div>
     '''
 else:
     header_html = '''
-    <div>
-        <div style="font-family:'Pretendard', 'Malgun Gothic', 'Apple SD Gothic Neo', sans-serif; font-weight:800; font-size:1.15rem; color:#111827; line-height:1.2;">(주) 수협개발</div>
-        <div class="main-title" style="margin:0; font-size:1.85rem; line-height:1.3;">📊 (주)수협개발 자료취합 시스템</div>
-    </div>
+    <div class="main-title" style="margin:0; font-size:1.85rem; font-weight:800; color:#1E3A8A; letter-spacing:-0.5px;">(주)수협개발 자료취합 시스템</div>
     '''
 st.markdown(header_html, unsafe_allow_html=True)
-st.markdown('<div class="sub-title">(주)수협개발 설문지 및 주요 자료를 취합하고 실시간 누적 결과 및 요약 통계를 모니터링합니다.</div>', unsafe_allow_html=True)
+st.markdown('<div class="sub-title" style="margin-bottom:1.2rem;">(주)수협개발 설문지 및 주요 자료를 취합하고 실시간 누적 결과 및 요약 통계를 모니터링합니다.</div>', unsafe_allow_html=True)
 
 # 최신 데이터 불러오기
 df_data = load_survey_data()
@@ -1186,28 +1246,57 @@ with tab1:
         )
         filtered_df = filtered_df[mask]
 
-    # 첨부파일 다운로드 링크 컬럼 추가 (정적 파일 서빙: app/static/uploads/<filename>)
-    def get_download_link(val):
+    # 첨부파일 원본 상태 컬럼 추가
+    def get_file_status(val):
         if not val or pd.isna(val):
-            return None
+            return "미첨부"
         v_str = str(val).strip()
-        if v_str and os.path.exists(os.path.join(UPLOAD_DIR, v_str)):
-            return f"app/static/uploads/{v_str}"
-        return None
+        f_real = find_upload_file(v_str)
+        if f_real and os.path.exists(f_real):
+            return "📥 원본 보관됨"
+        return "미첨부"
 
-    filtered_df["설문지다운로드"] = filtered_df["첨부파일"].apply(get_download_link)
+    filtered_df["설문지 원본"] = filtered_df["첨부파일"].apply(get_file_status)
 
-    # 표 표시용 컬럼 순서 (설문지다운로드 컬럼을 공사명 바로 다음에 배치)
+    # 표 표시용 컬럼 순서 (설문지 원본 컬럼을 공사명 바로 다음에 배치)
     col_order = [
-        "등록일시", "작성일", "발주사", "공사명", "설문지다운로드",
+        "등록일시", "작성일", "발주사", "공사명", "설문지 원본",
         "계약기간", "담당자소속", "담당자이름",
         *SCORE_COLUMNS, "합계", "평균", "첨부파일"
     ]
     disp_cols = [c for c in col_order if c in filtered_df.columns]
     table_df = filtered_df[disp_cols]
 
+    # 원본 파일이 첨부된 설문 빠른 1클릭 자동 다운로드 바
+    surveys_with_files = filtered_df[filtered_df["첨부파일"].notna() & (filtered_df["첨부파일"].astype(str).str.strip() != "")]
+    if len(surveys_with_files) > 0:
+        st.markdown("##### 📥 설문지 원본 자동 다운로드 (버튼 클릭 시 PC로 즉시 저장)")
+        q_cols = st.columns(min(len(surveys_with_files), 3))
+        for i, (_, row_item) in enumerate(surveys_with_files.iterrows()):
+            f_orig = str(row_item["첨부파일"]).strip()
+            real_path = find_upload_file(f_orig)
+            if real_path and os.path.exists(real_path):
+                with open(real_path, "rb") as f_quick:
+                    f_q_bytes = f_quick.read()
+                col_i = i % len(q_cols)
+                client_name = str(row_item['발주사'])
+                proj_name = str(row_item['공사명'])
+                proj_short = proj_name[:14] + "..." if len(proj_name) > 14 else proj_name
+                with q_cols[col_i]:
+                    m_type_q = "image/png" if f_orig.lower().endswith(".png") else "application/pdf" if f_orig.lower().endswith(".pdf") else "image/jpeg"
+                    st.download_button(
+                        label=f"📥 [{client_name}]\n{proj_short}",
+                        data=f_q_bytes,
+                        file_name=f_orig,
+                        mime=m_type_q,
+                        key=f"auto_dl_quick_{i}_{f_orig}",
+                        use_container_width=True,
+                        help=f"클릭 즉시 '{f_orig}' 파일이 PC 다운로드 폴더로 자동 저장됩니다."
+                    )
+        st.write("")
+
     if len(filtered_df) > 0:
-        st.caption("💡 **행(Row) 클릭 안내**: 특정 줄(행)을 마우스로 클릭하면 해당 건의 **원본 설문지 다운로드** 및 **삭제 버튼**이 활성화됩니다.")
+        st.caption("💡 **행(Row) 클릭 안내**: 특정 줄(행)을 마우스로 클릭하면 해당 건의 **원본 설문지 자동 다운로드** 및 **삭제 버튼**이 활성화됩니다.")
 
         selection_event = st.dataframe(
             table_df,
@@ -1220,10 +1309,10 @@ with tab1:
                 "작성일": st.column_config.TextColumn("작성일", width="small"),
                 "발주사": st.column_config.TextColumn("발주사", width="small"),
                 "공사명": st.column_config.TextColumn("공사명", width="medium"),
-                "설문지다운로드": st.column_config.LinkColumn(
-                    "설문지 다운로드",
-                    display_text="📥 다운로드",
-                    help="클릭 시 보관된 원본 지류 설문지 파일을 새 창에서 확인하거나 다운로드합니다."
+                "설문지 원본": st.column_config.TextColumn(
+                    "설문지 원본",
+                    width="small",
+                    help="첨부파일 보관 상태입니다. 위 자동 다운로드 버튼을 누르거나 행을 클릭하면 원본이 PC로 자동 다운로드됩니다."
                 ),
                 "계약기간": st.column_config.TextColumn("계약기간", width="medium"),
                 "담당자소속": st.column_config.TextColumn("담당자소속", width="small"),
@@ -1258,6 +1347,7 @@ with tab1:
                 target_dt = str(target_item["등록일시"])
                 target_proj = str(target_item["공사명"])
                 target_file = str(target_item.get("첨부파일", "")).strip()
+                real_target_path = find_upload_file(target_file)
 
                 with st.container():
                     st.info(
@@ -1265,19 +1355,19 @@ with tab1:
                     )
                     col_file_btn, col_del_btn = st.columns([2.5, 1.5])
                     with col_file_btn:
-                        if target_file and os.path.exists(os.path.join(UPLOAD_DIR, target_file)):
-                            file_full_path = os.path.join(UPLOAD_DIR, target_file)
-                            with open(file_full_path, "rb") as f_down:
+                        if real_target_path and os.path.exists(real_target_path):
+                            with open(real_target_path, "rb") as f_down:
                                 f_bytes = f_down.read()
                             m_type = "image/png" if target_file.lower().endswith(".png") else "application/pdf" if target_file.lower().endswith(".pdf") else "image/jpeg"
                             st.download_button(
-                                label=f"📥 선택한 설문지 원본 다운로드 ({target_file})",
+                                label=f"📥 선택한 설문지 원본 자동 다운로드 ({target_file})",
                                 data=f_bytes,
                                 file_name=target_file,
                                 mime=m_type,
                                 type="primary",
                                 use_container_width=True,
-                                key=f"btn_dl_sel_{sel_idx}"
+                                key=f"btn_dl_sel_{sel_idx}",
+                                help="클릭 즉시 브라우저를 통해 PC 다운로드 폴더로 자동 다운로드됩니다."
                             )
                         else:
                             st.caption("ℹ️ 본 항목은 첨부된 원본 파일이 없습니다.")
@@ -1296,8 +1386,8 @@ with tab1:
             if len(files_df) > 0:
                 for idx_f, rf in files_df.iterrows():
                     fn_curr = str(rf["첨부파일"]).strip()
-                    fn_path = os.path.join(UPLOAD_DIR, fn_curr)
-                    if os.path.exists(fn_path):
+                    fn_path = find_upload_file(fn_curr)
+                    if fn_path and os.path.exists(fn_path):
                         c_proj, c_btn = st.columns([3, 1.2])
                         with c_proj:
                             st.markdown(f"📄 **{rf['공사명']}** ({rf['발주사']}) — `{fn_curr}`")
@@ -1306,12 +1396,13 @@ with tab1:
                                 raw_bytes = f_entry.read()
                             m_type_box = "image/png" if fn_curr.lower().endswith(".png") else "application/pdf" if fn_curr.lower().endswith(".pdf") else "image/jpeg"
                             st.download_button(
-                                label="📥 다운로드",
+                                label="📥 자동 다운로드",
                                 data=raw_bytes,
                                 file_name=fn_curr,
                                 mime=m_type_box,
                                 key=f"box_dl_{idx_f}_{fn_curr}",
-                                use_container_width=True
+                                use_container_width=True,
+                                help=f"클릭 즉시 '{fn_curr}' 원본 파일이 PC 다운로드 폴더로 자동 저장됩니다."
                             )
             else:
                 st.info("현재 보관함에 등록된 첨부파일이 없습니다.")
