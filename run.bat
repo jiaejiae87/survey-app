@@ -1,5 +1,5 @@
 @echo off
-title 만족도 조사 집계 시스템
+title (주)수협개발 건설공사 만족도 조사 집계
 
 cd /d "%~dp0"
 

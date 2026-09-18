@@ -11,8 +11,8 @@ from PIL import Image
 # 1. 페이지 기본 설정 및 스타일
 # -------------------------------------------------------------
 st.set_page_config(
-    page_title="만족도 조사 집계 시스템",
-    page_icon="📋",
+    page_title="(주)수협개발 건설공사 만족도 조사 집계",
+    page_icon="🏢",
     layout="wide",
     initial_sidebar_state="expanded"
 )
@@ -49,6 +49,8 @@ st.markdown("""
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 DB_FILE = os.path.join(BASE_DIR, "survey.db")
 CSV_FILE = os.path.join(BASE_DIR, "survey_data.csv")
+UPLOAD_DIR = os.path.join(BASE_DIR, "static", "uploads")
+os.makedirs(UPLOAD_DIR, exist_ok=True)
 
 SCORE_COLUMNS = [
     "소통_설명및협의",
@@ -101,6 +103,7 @@ ALL_COLUMNS = [
     "계약기간",
     "담당자소속",
     "담당자이름",
+    "첨부파일",
     *SCORE_COLUMNS,
     "합계",
     "평균"
@@ -130,6 +133,7 @@ def init_db():
             계약기간 TEXT,
             담당자소속 TEXT,
             담당자이름 TEXT,
+            첨부파일 TEXT DEFAULT '',
             소통_설명및협의 INTEGER DEFAULT 5,
             품질_기간준수 INTEGER DEFAULT 5,
             품질_내용준수 INTEGER DEFAULT 5,
@@ -141,6 +145,10 @@ def init_db():
             평균 REAL DEFAULT 5.0
         );
         """)
+        cur.execute("PRAGMA table_info(surveys);")
+        existing_cols = [r[1] for r in cur.fetchall()]
+        if "첨부파일" not in existing_cols:
+            cur.execute("ALTER TABLE surveys ADD COLUMN 첨부파일 TEXT DEFAULT '';")
         cur.execute("CREATE INDEX IF NOT EXISTS idx_surveys_dt ON surveys(등록일시);")
         cur.execute("CREATE INDEX IF NOT EXISTS idx_surveys_client ON surveys(발주사);")
         conn.commit()
@@ -159,14 +167,15 @@ def init_db():
                 for _, r in df_csv.iterrows():
                     cur.execute("""
                     INSERT INTO surveys (
-                        등록일시, 작성일, 발주사, 공사명, 계약기간, 담당자소속, 담당자이름,
+                        등록일시, 작성일, 발주사, 공사명, 계약기간, 담당자소속, 담당자이름, 첨부파일,
                         소통_설명및협의, 품질_기간준수, 품질_내용준수, 품질_개선, 안전_사고예방, 기타_민원관리, 종합_전체만족도,
                         합계, 평균
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);
                     """, (
                         str(r["등록일시"]), str(r["작성일"]) if pd.notna(r["작성일"]) else "",
                         str(r["발주사"]), str(r["공사명"]), str(r["계약기간"]) if pd.notna(r["계약기간"]) else "",
                         str(r["담당자소속"]) if pd.notna(r["담당자소속"]) else "", str(r["담당자이름"]) if pd.notna(r["담당자이름"]) else "",
+                        str(r["첨부파일"]) if pd.notna(r.get("첨부파일")) else "",
                         int(r["소통_설명및협의"]) if pd.notna(r["소통_설명및협의"]) else 5,
                         int(r["품질_기간준수"]) if pd.notna(r["품질_기간준수"]) else 5,
                         int(r["품질_내용준수"]) if pd.notna(r["품질_내용준수"]) else 5,
@@ -722,9 +731,76 @@ def parse_survey_text(text: str) -> dict:
 
 
 # -------------------------------------------------------------
+# 3.1. (주)수협개발 보안 인증 게이트 페이지
+# -------------------------------------------------------------
+if not st.session_state.get("authenticated", False):
+    st.markdown("""
+    <style>
+        .gate-container {
+            max-width: 520px;
+            margin: 60px auto 30px auto;
+            padding: 35px 30px;
+            background: #FFFFFF;
+            border-radius: 16px;
+            box-shadow: 0 10px 25px -5px rgba(0, 0, 0, 0.08), 0 8px 10px -6px rgba(0, 0, 0, 0.06);
+            border-top: 6px solid #1E3A8A;
+            text-align: center;
+        }
+        .gate-title {
+            font-size: 1.5rem;
+            font-weight: 700;
+            color: #1E3A8A;
+            margin-top: 12px;
+            margin-bottom: 8px;
+            line-height: 1.4;
+        }
+        .gate-desc {
+            font-size: 0.95rem;
+            color: #475569;
+            margin-bottom: 10px;
+        }
+    </style>
+    <div class="gate-container">
+        <div style="font-size: 3rem;">🏢</div>
+        <div class="gate-title">(주)수협개발 건설공사 만족도 조사 집계사이트</div>
+        <div class="gate-desc">보안을 위해 <b>인증번호 입력 후 접속 가능합니다.</b></div>
+    </div>
+    """, unsafe_allow_html=True)
+
+    col_gate_l, col_gate_c, col_gate_r = st.columns([1, 1.4, 1])
+    with col_gate_c:
+        with st.form("gate_login_form"):
+            auth_password = st.text_input(
+                "인증번호",
+                type="password",
+                placeholder="인증번호를 입력하세요...",
+                help="접속 인증번호를 입력하세요."
+            )
+            btn_gate_submit = st.form_submit_button("접속하기", type="primary", use_container_width=True)
+
+            if btn_gate_submit:
+                if auth_password == "수협개발":
+                    st.session_state["authenticated"] = True
+                    st.rerun()
+                else:
+                    st.error("⚠️ 인증번호가 일치하지 않습니다.")
+                    st.caption("인증번호 문의는 (주)수협개발 관리자에게 확인해 주시기 바랍니다.")
+
+    st.stop()
+
+
+# -------------------------------------------------------------
 # 4. 좌측 사이드바: 파일 업로드 & 입력 폼
 # -------------------------------------------------------------
 with st.sidebar:
+    col_auth_l, col_auth_r = st.columns([2.5, 1.5])
+    with col_auth_l:
+        st.markdown("<span style='color:#166534; font-weight:600; font-size:0.85rem;'>🟢 (주)수협개발 인증 완료</span>", unsafe_allow_html=True)
+    with col_auth_r:
+        if st.button("로그아웃", use_container_width=True, help="인증 게이트 화면으로 돌아갑니다."):
+            st.session_state["authenticated"] = False
+            st.rerun()
+
     st.header("📝 설문지 입력 & 파일 확인")
     st.caption("지류 설문지 스캔본/사진을 올리고 바로 입력하세요.")
 
@@ -900,6 +976,21 @@ with st.sidebar:
                 avg_score = round(total_sum / len(scores), 1)
                 now_str = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
+                # 첨부파일 물리 보관 (이미지 서버 저장소: static/uploads)
+                saved_filename = ""
+                if uploaded_file is not None:
+                    try:
+                        orig_name = uploaded_file.name
+                        clean_name = re.sub(r'[^a-zA-Z0-9가-힣._-]', '_', orig_name)
+                        saved_filename = f"{datetime.datetime.now().strftime('%Y%m%d_%H%M%S')}_{clean_name}"
+                        save_target_path = os.path.join(UPLOAD_DIR, saved_filename)
+                        uploaded_file.seek(0)
+                        with open(save_target_path, "wb") as f_save:
+                            f_save.write(uploaded_file.read())
+                        uploaded_file.seek(0)
+                    except Exception as ex_save:
+                        st.warning(f"첨부파일 저장 알림: {ex_save}")
+
                 new_data = {
                     "등록일시": now_str,
                     "작성일": survey_date,
@@ -908,6 +999,7 @@ with st.sidebar:
                     "계약기간": period,
                     "담당자소속": dept,
                     "담당자이름": manager_name,
+                    "첨부파일": saved_filename,
                     "소통_설명및협의": score_communication,
                     "품질_기간준수": score_quality_period,
                     "품질_내용준수": score_quality_content,
@@ -943,8 +1035,8 @@ with st.sidebar:
 # -------------------------------------------------------------
 # 5. 메인 화면: 실시간 누적 집계표 및 요약 통계
 # -------------------------------------------------------------
-st.markdown('<div class="main-title">📊 지류 만족도 조사 실시간 집계 대시보드</div>', unsafe_allow_html=True)
-st.markdown('<div class="sub-title">종이로 수합된 설문지를 등록하고 실시간 누적 결과 및 요약 통계를 모니터링합니다.</div>', unsafe_allow_html=True)
+st.markdown('<div class="main-title">📊 (주)수협개발 건설공사 만족도 조사 집계</div>', unsafe_allow_html=True)
+st.markdown('<div class="sub-title">(주)수협개발 건설공사 설문지를 등록하고 실시간 누적 결과 및 요약 통계를 모니터링합니다.</div>', unsafe_allow_html=True)
 
 # 최신 데이터 불러오기
 df_data = load_survey_data()
@@ -1040,11 +1132,31 @@ with tab1:
         )
         filtered_df = filtered_df[mask]
 
+    # 첨부파일 다운로드 링크 컬럼 추가 (정적 파일 서빙: app/static/uploads/<filename>)
+    def get_download_link(val):
+        if not val or pd.isna(val):
+            return None
+        v_str = str(val).strip()
+        if v_str and os.path.exists(os.path.join(UPLOAD_DIR, v_str)):
+            return f"app/static/uploads/{v_str}"
+        return None
+
+    filtered_df["설문지다운로드"] = filtered_df["첨부파일"].apply(get_download_link)
+
+    # 표 표시용 컬럼 순서 (설문지다운로드 컬럼을 공사명 바로 다음에 배치)
+    col_order = [
+        "등록일시", "작성일", "발주사", "공사명", "설문지다운로드",
+        "계약기간", "담당자소속", "담당자이름",
+        *SCORE_COLUMNS, "합계", "평균", "첨부파일"
+    ]
+    disp_cols = [c for c in col_order if c in filtered_df.columns]
+    table_df = filtered_df[disp_cols]
+
     if len(filtered_df) > 0:
-        st.caption("💡 **행(Row) 삭제 방법**: 삭제하고 싶은 줄(행)을 표에서 마우스로 클릭하면 삭제 버튼이 활성화됩니다.")
+        st.caption("💡 **행(Row) 클릭 안내**: 특정 줄(행)을 마우스로 클릭하면 해당 건의 **원본 설문지 다운로드** 및 **삭제 버튼**이 활성화됩니다.")
 
         selection_event = st.dataframe(
-            filtered_df,
+            table_df,
             use_container_width=True,
             hide_index=True,
             on_select="rerun",
@@ -1054,9 +1166,15 @@ with tab1:
                 "작성일": st.column_config.TextColumn("작성일", width="small"),
                 "발주사": st.column_config.TextColumn("발주사", width="small"),
                 "공사명": st.column_config.TextColumn("공사명", width="medium"),
+                "설문지다운로드": st.column_config.LinkColumn(
+                    "설문지 다운로드",
+                    display_text="📥 다운로드",
+                    help="클릭 시 보관된 원본 지류 설문지 파일을 새 창에서 확인하거나 다운로드합니다."
+                ),
                 "계약기간": st.column_config.TextColumn("계약기간", width="medium"),
                 "담당자소속": st.column_config.TextColumn("담당자소속", width="small"),
                 "담당자이름": st.column_config.TextColumn("담당자이름", width="small"),
+                "첨부파일": st.column_config.TextColumn("첨부파일명", width="medium"),
                 "소통_설명및협의": st.column_config.NumberColumn("소통:설명및협의", format="%d"),
                 "품질_기간준수": st.column_config.NumberColumn("품질:기간준수", format="%d"),
                 "품질_내용준수": st.column_config.NumberColumn("품질:내용준수", format="%d"),
@@ -1070,7 +1188,7 @@ with tab1:
         )
         st.caption(f"총 {len(filtered_df)}개의 설문 결과가 조회되었습니다.")
 
-        # 표에서 마우스 클릭으로 행을 선택했을 때 나타나는 삭제 패널
+        # 표에서 마우스 클릭으로 행을 선택했을 때 나타나는 원본 다운로드 및 삭제 패널
         selected_rows = []
         if selection_event and hasattr(selection_event, "selection"):
             sel = selection_event.selection
@@ -1085,18 +1203,64 @@ with tab1:
                 target_item = filtered_df.iloc[sel_idx]
                 target_dt = str(target_item["등록일시"])
                 target_proj = str(target_item["공사명"])
+                target_file = str(target_item.get("첨부파일", "")).strip()
 
                 with st.container():
-                    st.warning(
+                    st.info(
                         f"선택한 설문: **[{target_item.get('작성일', target_item['등록일시'])}] {target_item['발주사']} - {target_item['공사명']} (담당: {target_item['담당자이름']})**"
                     )
-                    col_del_btn, col_del_space = st.columns([2.5, 7.5])
+                    col_file_btn, col_del_btn = st.columns([2.5, 1.5])
+                    with col_file_btn:
+                        if target_file and os.path.exists(os.path.join(UPLOAD_DIR, target_file)):
+                            file_full_path = os.path.join(UPLOAD_DIR, target_file)
+                            with open(file_full_path, "rb") as f_down:
+                                f_bytes = f_down.read()
+                            m_type = "image/png" if target_file.lower().endswith(".png") else "application/pdf" if target_file.lower().endswith(".pdf") else "image/jpeg"
+                            st.download_button(
+                                label=f"📥 선택한 설문지 원본 다운로드 ({target_file})",
+                                data=f_bytes,
+                                file_name=target_file,
+                                mime=m_type,
+                                type="primary",
+                                use_container_width=True,
+                                key=f"btn_dl_sel_{sel_idx}"
+                            )
+                        else:
+                            st.caption("ℹ️ 본 항목은 첨부된 원본 파일이 없습니다.")
+
                     with col_del_btn:
-                        if st.button("🗑️ 선택한 이 행 삭제하기", type="primary", use_container_width=True, key="btn_table_delete"):
+                        if st.button("🗑️ 선택한 이 행 삭제하기", type="secondary", use_container_width=True, key="btn_table_delete"):
                             if delete_survey_entry(target_dt, target_proj):
                                 st.cache_data.clear()
                                 st.success("✅ 실시간 삭제 완료! 화면을 갱신합니다...")
                                 st.rerun()
+
+        # 첨부파일 이미지 저장소 보관함 전체 목록
+        with st.expander("📁 설문지 원본 파일(이미지 서버) 보관함 / 전체 다운로드", expanded=False):
+            st.caption("등록 시 업로드된 설문지 원본 파일들이 이미지 서버 저장소(`static/uploads`)에 안전하게 영구 보관됩니다.")
+            files_df = df_data[df_data["첨부파일"].notna() & (df_data["첨부파일"].astype(str).str.strip() != "")]
+            if len(files_df) > 0:
+                for idx_f, rf in files_df.iterrows():
+                    fn_curr = str(rf["첨부파일"]).strip()
+                    fn_path = os.path.join(UPLOAD_DIR, fn_curr)
+                    if os.path.exists(fn_path):
+                        c_proj, c_btn = st.columns([3, 1.2])
+                        with c_proj:
+                            st.markdown(f"📄 **{rf['공사명']}** ({rf['발주사']}) — `{fn_curr}`")
+                        with c_btn:
+                            with open(fn_path, "rb") as f_entry:
+                                raw_bytes = f_entry.read()
+                            m_type_box = "image/png" if fn_curr.lower().endswith(".png") else "application/pdf" if fn_curr.lower().endswith(".pdf") else "image/jpeg"
+                            st.download_button(
+                                label="📥 다운로드",
+                                data=raw_bytes,
+                                file_name=fn_curr,
+                                mime=m_type_box,
+                                key=f"box_dl_{idx_f}_{fn_curr}",
+                                use_container_width=True
+                            )
+            else:
+                st.info("현재 보관함에 등록된 첨부파일이 없습니다.")
 
         # 또는 하단 드롭다운 목록에서 번호로 골라 삭제할 수 있는 보조 기능
         with st.expander("🗑️ 목록에서 직접 골라서 삭제하기"):
