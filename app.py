@@ -1267,34 +1267,6 @@ with tab1:
     disp_cols = [c for c in col_order if c in filtered_df.columns]
     table_df = filtered_df[disp_cols]
 
-    # 원본 파일이 첨부된 설문 빠른 1클릭 자동 다운로드 바
-    surveys_with_files = filtered_df[filtered_df["첨부파일"].notna() & (filtered_df["첨부파일"].astype(str).str.strip() != "")]
-    if len(surveys_with_files) > 0:
-        st.markdown("##### 📥 설문지 원본 자동 다운로드 (버튼 클릭 시 PC로 즉시 저장)")
-        q_cols = st.columns(min(len(surveys_with_files), 3))
-        for i, (_, row_item) in enumerate(surveys_with_files.iterrows()):
-            f_orig = str(row_item["첨부파일"]).strip()
-            real_path = find_upload_file(f_orig)
-            if real_path and os.path.exists(real_path):
-                with open(real_path, "rb") as f_quick:
-                    f_q_bytes = f_quick.read()
-                col_i = i % len(q_cols)
-                client_name = str(row_item['발주사'])
-                proj_name = str(row_item['공사명'])
-                proj_short = proj_name[:14] + "..." if len(proj_name) > 14 else proj_name
-                with q_cols[col_i]:
-                    m_type_q = "image/png" if f_orig.lower().endswith(".png") else "application/pdf" if f_orig.lower().endswith(".pdf") else "image/jpeg"
-                    st.download_button(
-                        label=f"📥 [{client_name}]\n{proj_short}",
-                        data=f_q_bytes,
-                        file_name=f_orig,
-                        mime=m_type_q,
-                        key=f"auto_dl_quick_{i}_{f_orig}",
-                        use_container_width=True,
-                        help=f"클릭 즉시 '{f_orig}' 파일이 PC 다운로드 폴더로 자동 저장됩니다."
-                    )
-        st.write("")
-
     if len(filtered_df) > 0:
         st.caption("💡 **행(Row) 클릭 안내**: 특정 줄(행)을 마우스로 클릭하면 해당 건의 **원본 설문지 자동 다운로드** 및 **삭제 버튼**이 활성화됩니다.")
 
@@ -1312,7 +1284,7 @@ with tab1:
                 "설문지 원본": st.column_config.TextColumn(
                     "설문지 원본",
                     width="small",
-                    help="첨부파일 보관 상태입니다. 위 자동 다운로드 버튼을 누르거나 행을 클릭하면 원본이 PC로 자동 다운로드됩니다."
+                    help="첨부파일 보관 여부입니다. 해당 행을 마우스로 클릭하면 원본 설문지 다운로드 버튼이 활성화됩니다."
                 ),
                 "계약기간": st.column_config.TextColumn("계약기간", width="medium"),
                 "담당자소속": st.column_config.TextColumn("담당자소속", width="small"),
